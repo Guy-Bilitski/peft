@@ -39,8 +39,8 @@ class UILinLoRALayer(BaseTunerLayer):
         scaling_factor: float = 1.0,
         enforce_sv_positive: bool = False,
         uilinlora_dropout: float = 0.0,
-        init_uilinlora_weights: bool = True,
-        d_initial: float = 1e-1,
+        initial_scaler: Optional[float] = 1e-1,
+        initial_sigma: Optional[float] = 1e-1,
         **kwargs,
     ):
         if adapter_name in self.uilinlora_sigma.keys():
@@ -66,10 +66,12 @@ class UILinLoRALayer(BaseTunerLayer):
         self.register_buffer(f"{adapter_name}_U", U_r.detach(), persistent=True)
         self.register_buffer(f"{adapter_name}_V", V_r.detach(), persistent=True)
 
-        # Initialize parameters
-        self.uilinlora_sigma[adapter_name] = nn.Parameter(torch.full((rank,), d_initial))
-        self.uilinlora_D[adapter_name] = nn.Parameter(torch.ones(self.in_features))
-        self.uilinlora_E[adapter_name] = nn.Parameter(torch.ones(self.out_features))
+        # Initialize parameters with provided values or defaults
+        self.uilinlora_sigma[adapter_name] = nn.Parameter(torch.full((rank,), initial_sigma))
+
+        # Initialize D and E with provided scaler or default of 1
+        self.uilinlora_D[adapter_name] = nn.Parameter(torch.full((self.in_features,), initial_scaler))
+        self.uilinlora_E[adapter_name] = nn.Parameter(torch.full((self.out_features,), initial_scaler))
 
         self._meta[adapter_name] = dict(sf=scaling_factor, pos=enforce_sv_positive)
 

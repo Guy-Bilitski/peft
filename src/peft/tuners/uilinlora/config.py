@@ -5,6 +5,7 @@ from typing import Optional, Union, List
 
 from peft.config import PeftConfig
 from peft.utils import PeftType
+import torch
 
 
 @dataclass
@@ -33,6 +34,10 @@ class UILinLoRAConfig(PeftConfig):
         init_uilinlora_weights (`bool`):
             Whether to initialize the weights of the row-based adapter. If True, the first row will be initialized
             to 1.0, meaning the adapter will initially be a no-op. If False, the weights will be randomly initialized.
+        initial_scaler (`Optional[float]`):
+            Initial value for both D and E scaling parameters. Defaults to 1e-1.
+        initial_sigma (`Optional[float]`):
+            Initial value for the sigma parameters. Defaults to 1e-1.
     """
 
     target_modules: Optional[Union[list[str], str]] = field(
@@ -73,7 +78,14 @@ class UILinLoRAConfig(PeftConfig):
     rank: int | list[int] = field(default=128,  metadata={"help": "#SVs to train"})
     scaling_factor: float = field(default=1.0)
     enforce_sv_positive: bool = field(default=False)
-
+    initial_scaler: Optional[float] = field(
+        default=1e-1,
+        metadata={"help": "Initial value for both D and E scaling parameters. Defaults to 1e-1."}
+    )
+    initial_sigma: Optional[float] = field(
+        default=1e-1,
+        metadata={"help": "Initial value for the sigma parameters. Defaults to 1e-1."}
+    )
 
     def __post_init__(self):        
         super().__post_init__()

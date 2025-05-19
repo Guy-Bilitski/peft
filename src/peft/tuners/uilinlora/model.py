@@ -190,6 +190,8 @@ class UILinLoRAModel(BaseTuner):
             uilinlora_dropout = uilinlora_config.uilinlora_dropout,
             init_uilinlora_weights = uilinlora_config.init_uilinlora_weights,
             fan_in_fan_out = uilinlora_config.fan_in_fan_out,
+            initial_scaler = uilinlora_config.initial_scaler,
+            initial_sigma = uilinlora_config.initial_sigma,
         )
         kwargs.update(common)
 
