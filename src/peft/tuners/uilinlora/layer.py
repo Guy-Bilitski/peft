@@ -116,6 +116,8 @@ class Linear(nn.Linear, UILinLoRALayer):
             enforce_sv_positive=kwargs.pop("enforce_sv_positive"),
             uilinlora_alpha=uilinlora_alpha,
             uilinlora_dropout=uilinlora_dropout,
+            initial_scaler=kwargs.pop("initial_scaler"),
+            initial_sigma=kwargs.pop("initial_sigma"),
             init_uilinlora_weights=init_uilinlora_weights)
 
     def get_delta_weight(self, adapter: str) -> torch.Tensor:
