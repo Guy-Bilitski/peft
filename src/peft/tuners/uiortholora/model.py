@@ -32,7 +32,7 @@ else:
 
 
 class UIOrthoLoRAModel(BaseTuner):
-    """Parameter‑efficient row-based adapter where only the first row of each weight matrix is trainable.
+    """Parameter‑efficient adapter for orthogonal low-rank adaptation.
 
     The public API (prepare, merge_and_unload, unload, etc.) matches
     HuggingFace PEFT tuners.
@@ -92,7 +92,8 @@ class UIOrthoLoRAModel(BaseTuner):
         
         bias = hasattr(target, "bias") and target.bias is not None
         kwargs = {
-            "rank": uiortholora_config.rank,
+            "num_svalues_to_adapt": uiortholora_config.num_svalues_to_adapt,
+            "num_svectors_to_adapt": uiortholora_config.num_svectors_to_adapt,
             "uiortholora_dropout": uiortholora_config.uiortholora_dropout,
             "fan_in_fan_out": uiortholora_config.fan_in_fan_out,
             "init_weights": uiortholora_config.init_uiortholora_weights,
@@ -108,7 +109,9 @@ class UIOrthoLoRAModel(BaseTuner):
                 uiortholora_config.uiortholora_alpha,
                 uiortholora_config.uiortholora_dropout,
                 uiortholora_config.init_uiortholora_weights,
-                uiortholora_config.bias,
+                # uiortholora_config.bias,
+                uiortholora_config.num_svalues_to_adapt,
+                uiortholora_config.num_svectors_to_adapt,
             )
             return
 
@@ -182,7 +185,8 @@ class UIOrthoLoRAModel(BaseTuner):
 
         # ── common args forwarded to every wrapper ────────────────────────
         common = dict(
-            rank           = uiortholora_config.rank,
+            num_svalues_to_adapt = uiortholora_config.num_svalues_to_adapt,
+            num_svectors_to_adapt = uiortholora_config.num_svectors_to_adapt,
             scaling_factor = uiortholora_config.scaling_factor,
             enforce_sv_positive = uiortholora_config.enforce_sv_positive,
             bias           = bias,

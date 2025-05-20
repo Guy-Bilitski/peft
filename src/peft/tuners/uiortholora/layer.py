@@ -23,9 +23,10 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         self.uiortholora_sigma = nn.ParameterDict()
         self.uiortholora_D = nn.ParameterDict()
         self.uiortholora_E = nn.ParameterDict()
-        self.left_unitary = nn.ParameterList()
-        self.right_unitary = nn.ParameterList()
+        self.uiortholora_left_unitary = nn.ParameterDict()
+        self.uiortholora_right_unitary = nn.ParameterDict()
         self.uiortholora_dropout = nn.ModuleDict()
+        self.device = self.base_layer.weight.device
         self._meta: Dict[str, dict] = {}
         self.kwargs = kwargs
 
@@ -37,8 +38,6 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         self,
         adapter_name: str,
         *,
-        num_svalues_to_adapt: int,
-        num_svectors_to_adapt: int,
         scaling_factor: float = 1.0,
         enforce_sv_positive: bool = False,
         uiortholora_dropout: float = 0.0,
@@ -46,6 +45,9 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         initial_sigma: Optional[float] = 1e-1,
         **kwargs,
     ):
+        
+        print("kwargs: ", kwargs)
+
         if adapter_name in self.uiortholora_sigma.keys():
             return
 
@@ -63,14 +65,14 @@ class UIOrthoLoRALayer(BaseTunerLayer):
 
         # Compute SVD and slice the smallest singular vectors
         U, S, Vh = torch.linalg.svd(base_w.float(), full_matrices=False)
-        ids = torch.argsort(S)[:rank]
+        ids = torch.argsort(S)[:self.num_svalues_to_adapt]
         U_r, V_r = U[:, ids], Vh[ids, :]
 
         self.register_buffer(f"{adapter_name}_U", U_r.detach(), persistent=True)
         self.register_buffer(f"{adapter_name}_V", V_r.detach(), persistent=True)
 
         # Initialize parameters with provided values or defaults
-        self.uiortholora_sigma[adapter_name] = nn.Parameter(torch.full((rank,), initial_sigma))
+        self.uiortholora_sigma[adapter_name] = nn.Parameter(torch.full((self.num_svalues_to_adapt,), initial_sigma))
 
         # Initialize D and E with provided scaler or default of 1
         self.uiortholora_D[adapter_name] = nn.Parameter(torch.full((self.in_features,), initial_scaler))
@@ -87,8 +89,8 @@ class UIOrthoLoRALayer(BaseTunerLayer):
             nn.Linear(orthogonal_size, orthogonal_size, bias=False)
         )
         
-        self.left_unitary.append(left_orthogonal)
-        self.right_unitary.append(right_orthogonal)
+        self.uiortholora_left_unitary[adapter_name] = left_orthogonal
+        self.uiortholora_right_unitary[adapter_name] = right_orthogonal
 
         self._meta[adapter_name] = dict(sf=scaling_factor, pos=enforce_sv_positive)
 
@@ -124,15 +126,21 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         # Initialize UIOrthoLoRALayer
         UIOrthoLoRALayer.__init__(self, base_layer, **kwargs)
         self.fan_in_fan_out = fan_in_fan_out
+        self.num_svalues_to_adapt = kwargs.pop("num_svalues_to_adapt")
+        self.num_svectors_to_adapt = kwargs.pop("num_svectors_to_adapt")
+
+        print("num_svalues_to_adapt: ", self.num_svalues_to_adapt)
+        print("num_svectors_to_adapt: ", self.num_svectors_to_adapt)
 
         self._active_adapter = adapter_name
         self.update_layer(
             adapter_name,
-            rank=kwargs.pop("rank"),
             scaling_factor=kwargs.pop("scaling_factor"),
             enforce_sv_positive=kwargs.pop("enforce_sv_positive"),
             uiortholora_alpha=uiortholora_alpha,
             uiortholora_dropout=uiortholora_dropout,
+            initial_scaler=kwargs.pop("initial_scaler"),
+            initial_sigma=kwargs.pop("initial_sigma"),
             init_uiortholora_weights=init_uiortholora_weights)
 
     def get_delta_weight(self, adapter: str) -> torch.Tensor:
@@ -149,6 +157,8 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         V = getattr(self, f"{adapter}_V")         # (r, in)
         D = self.uiortholora_D[adapter]             # (in,)
         E = self.uiortholora_E[adapter]             # (out,)
+        left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[adapter], self.in_features)
+        right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[adapter], self.out_features)
 
         # Broadcast D and E
         VD = V * D.unsqueeze(0).clone()                   # (r, in)
@@ -156,7 +166,7 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
 
         Σ = torch.diag(diag)                      # (r, r)
 
-        core = UE @ Σ @ VD                        # (out, in)
+        core = UE @ left_unitary @ Σ @ right_unitary @ VD                        # (out, in)
         return self._meta[adapter]["sf"] * core.to(self.get_base_layer().weight.dtype)
 
 
@@ -231,14 +241,16 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             U = getattr(self, f"{name}_U")               # (out, r)
             V = getattr(self, f"{name}_V")               # (r, in)
             D = self.uiortholora_D[name]                   # (in,)
-            E = self.uiortholora_E[name]   
+            E = self.uiortholora_E[name]
+            left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], self.in_features)
+            right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], self.out_features)
             
 
             x_casted = x.to(diag.dtype)
             
-            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), V * D.unsqueeze(0))  # (B, r)
+            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (V @ right_unitary.T) * D.unsqueeze(0))  # (B, r)
             x_proj = x_proj * diag                                                  # (B, r)
-            delta = F.linear(x_proj, U * E.unsqueeze(1))                             # (B, out)
+            delta = F.linear(x_proj, (left_unitary @ U) * E.unsqueeze(1))                             # (B, out)
 
             result = result + self._meta[name]["sf"] * delta
 
@@ -250,6 +262,38 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
 
     def __repr__(self):
         return f"UIOrthoLoRALayer({self.get_base_layer().__repr__()})"
+    
+    def _calc_left_unitary(self, left_unitary, left_size):
+        rank_to_preserve = left_size - self.num_svectors_to_adapt
+        return self._build_projection_matrix(left_unitary.weight, left_size, rank_to_preserve)
+    
+    def _calc_right_unitary(self, right_unitary, right_size):
+        rank_to_preserve = right_size - self.num_svectors_to_adapt
+        return self._build_projection_matrix(right_unitary.weight, right_size, rank_to_preserve)
+    
+    def _build_projection_matrix(self, projection_matrix, size, rank_to_preserve):
+        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device=self.device)
+        upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device=self.device)), dim=1)
+        down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device=self.device), projection_matrix), dim=1)
+        return torch.cat((upper_matrix, down_matrix), dim=0)
+    
+    def _calc_sigma(self, adapter, left_size, right_size):
+        max_rank = min(left_size, right_size)
+        not_trainable_part_size = max_rank - self.num_svalues_to_adapt
+        sigma = torch.zeros(max_rank, max_rank, device=self.device)
+        sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device=self.device)
+        if self._meta[adapter]["pos"]:
+            non_trainable = torch.diag(torch.relu(adapter))
+        else:
+            non_trainable = torch.diag(adapter)
+        sigma[not_trainable_part_size:, not_trainable_part_size:] = non_trainable
+        
+        if max_rank < left_size:
+            sigma = torch.cat((sigma, torch.zeros(left_size - max_rank, max_rank)), dim=0)
+        elif max_rank < right_size:
+            sigma = torch.cat((sigma, torch.zeros(max_rank, right_size - max_rank)), dim=1)
+        
+        return sigma
 
 
 

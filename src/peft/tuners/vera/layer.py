@@ -75,6 +75,8 @@ class VeraLayer(BaseTunerLayer):
         init_weights,
         d_initial: float = 0.1,
     ):
+        print("adapter_name: ", adapter_name)
+
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r

@@ -11,7 +11,7 @@ task_name = sys.argv[1]
 gpu_id = "0"
 
 # Define search space (SST-2)
-ranks = [64, 128, 256]
+ranks = [128, 256]
 head_lrs = [4e-4, 1e-3, 4e-3]
 adapter_lrs = [4e-4, 1e-3, 4e-3]
 initial_scalers = [1e-7, 1e-2, 1e-1, 1]

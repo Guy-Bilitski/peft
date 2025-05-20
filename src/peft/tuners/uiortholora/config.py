@@ -34,6 +34,10 @@ class UIOrthoLoRAConfig(PeftConfig):
         init_uiortholora_weights (`bool`):
             Whether to initialize the weights of the row-based adapter. If True, the first row will be initialized
             to 1.0, meaning the adapter will initially be a no-op. If False, the weights will be randomly initialized.
+        num_svalues_to_adapt (`int`):
+            Number of singular values to adapt.
+        num_svectors_to_adapt (`int`):
+            Number of singular vectors to adapt.
         initial_scaler (`Optional[float]`):
             Initial value for both D and E scaling parameters. Defaults to 1e-1.
         initial_sigma (`Optional[float]`):
@@ -75,7 +79,8 @@ class UIOrthoLoRAConfig(PeftConfig):
             )
         },
     )
-    rank: int | list[int] = field(default=128,  metadata={"help": "#SVs to train"})
+    num_svalues_to_adapt: int | list[int] = field(default=128,  metadata={"help": "#SVs to train"})
+    num_svectors_to_adapt: int | list[int] = field(default=128,  metadata={"help": "#SVs to train"})
     scaling_factor: float = field(default=1.0)
     enforce_sv_positive: bool = field(default=False)
     initial_scaler: Optional[float] = field(
