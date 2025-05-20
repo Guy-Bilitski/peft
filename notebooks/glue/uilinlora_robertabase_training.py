@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import torch, evaluate, argparse
 from datasets import load_dataset
@@ -8,6 +8,7 @@ from transformers import (
     TrainingArguments, BitsAndBytesConfig, Trainer
 )
 from peft import UILinLoRAConfig, get_peft_model, TaskType
+from datetime import datetime
 from clearml import Task
 
 
@@ -89,6 +90,17 @@ def print_trainable_params(model):
     print(f"Trainable %: {100 * trainable / total:.8f}%")
 
 
+def write_results(score, timestamp, args):
+    output_path = f"results_{args.task}_{timestamp}.txt"
+
+    if not os.path.exists(output_path):
+        with open(output_path, "w") as f:
+            f.write("rank,head_lr,adapter_lr,scaler,sigma,score\n")
+
+    with open(output_path, "a") as f:
+        f.write(f"{args.rank},{args.head_lr},{args.adapter_lr},{args.initial_scaler},{args.initial_sigma},{score:.4f}\n")
+
+
 # ---------------------------  main  --------------------------- #
 def main():
     parser = argparse.ArgumentParser()
@@ -104,11 +116,13 @@ def main():
     parser.add_argument("--initial_sigma", type=float, default=1.0)
     args = parser.parse_args()
 
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     task = Task.init(
-        project_name="GLUE benchmark", 
-        task_name=f"UILinLoRA tuner - {args.task}"
+        project_name="GLUE benchmark",
+        task_name=f"UILinLoRA tuner - {args.task} - {timestamp}"
     )
     task.connect(args)
+
 
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     torch.set_printoptions(threshold=float("inf"))
@@ -142,9 +156,9 @@ def main():
         output_dir=f"uilinlora-roberta-base-{args.task}",
         per_device_train_batch_size=args.batch_size,
         num_train_epochs=args.epochs,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
+        eval_strategy="no",
+        save_strategy="no",
+        load_best_model_at_end=False,
         metric_for_best_model=eval_metric_type,
         greater_is_better=True,
         warmup_ratio=0.06,
@@ -168,7 +182,10 @@ def main():
     )
 
     trainer.train()
-    print(f"Best-epoch {eval_metric_type}:", trainer.evaluate()[f"eval_{eval_metric_type}"])
+
+    score = trainer.evaluate()[f"eval_{eval_metric_type}"]
+    print(f"Final {eval_metric_type}:", score)
+    write_results(score, timestamp, args)
 
 
 if __name__ == "__main__":
