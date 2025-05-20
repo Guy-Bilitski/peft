@@ -23,6 +23,8 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         self.uiortholora_sigma = nn.ParameterDict()
         self.uiortholora_D = nn.ParameterDict()
         self.uiortholora_E = nn.ParameterDict()
+        self.left_unitary = nn.ParameterList()
+        self.right_unitary = nn.ParameterList()
         self.uiortholora_dropout = nn.ModuleDict()
         self._meta: Dict[str, dict] = {}
         self.kwargs = kwargs
@@ -35,7 +37,8 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         self,
         adapter_name: str,
         *,
-        rank: int,
+        num_svalues_to_adapt: int,
+        num_svectors_to_adapt: int,
         scaling_factor: float = 1.0,
         enforce_sv_positive: bool = False,
         uiortholora_dropout: float = 0.0,
@@ -72,6 +75,20 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         # Initialize D and E with provided scaler or default of 1
         self.uiortholora_D[adapter_name] = nn.Parameter(torch.full((self.in_features,), initial_scaler))
         self.uiortholora_E[adapter_name] = nn.Parameter(torch.full((self.out_features,), initial_scaler))
+
+        rank = min(self.in_features, self.out_features)
+        rank_to_preserve = rank - self.num_svectors_to_adapt
+        orthogonal_size = rank - rank_to_preserve
+
+        left_orthogonal = torch.nn.utils.parametrizations.orthogonal(
+            nn.Linear(orthogonal_size, orthogonal_size, bias=False)
+        )
+        right_orthogonal = torch.nn.utils.parametrizations.orthogonal(
+            nn.Linear(orthogonal_size, orthogonal_size, bias=False)
+        )
+        
+        self.left_unitary.append(left_orthogonal)
+        self.right_unitary.append(right_orthogonal)
 
         self._meta[adapter_name] = dict(sf=scaling_factor, pos=enforce_sv_positive)
 

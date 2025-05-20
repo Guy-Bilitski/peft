@@ -1385,12 +1385,12 @@ def get_cifar10_datasets(device):
     )
 
 
-class UIOrthoLoRAV2(nn.Module):
+class UIOrthoLoRA(nn.Module):
     def __init__(self, base_model, device, sigma_regularization, num_of_svectors_to_adapt,
                  num_of_svalues_to_adapt=4, scaling_factor=1, 
                  E_init_value=1e-7, D_init_value=1e-7, adapter_init_value=1e-7,
                  layers_to_adapt=[0], activation=nn.ReLU(), enforce_sv_positive=False):
-        super(UIOrthoLoRAV2, self).__init__()
+        super(UIOrthoLoRA, self).__init__()
         self.base_model = copy.deepcopy(base_model)
         self.scaling_factor = scaling_factor
         self.layers_to_adapt = layers_to_adapt

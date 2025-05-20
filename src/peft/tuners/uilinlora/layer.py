@@ -66,6 +66,9 @@ class UILinLoRALayer(BaseTunerLayer):
         self.register_buffer(f"{adapter_name}_U", U_r.detach(), persistent=True)
         self.register_buffer(f"{adapter_name}_V", V_r.detach(), persistent=True)
 
+        print("Initial scaler: ", initial_scaler)
+        print("Initial sigma: ", initial_sigma)
+
         # Initialize parameters with provided values or defaults
         self.uilinlora_sigma[adapter_name] = nn.Parameter(torch.full((rank,), initial_sigma))
 
@@ -116,6 +119,8 @@ class Linear(nn.Linear, UILinLoRALayer):
             enforce_sv_positive=kwargs.pop("enforce_sv_positive"),
             uilinlora_alpha=uilinlora_alpha,
             uilinlora_dropout=uilinlora_dropout,
+            initial_scaler=kwargs.pop("initial_scaler"),
+            initial_sigma=kwargs.pop("initial_sigma"),
             init_uilinlora_weights=init_uilinlora_weights)
 
     def get_delta_weight(self, adapter: str) -> torch.Tensor:

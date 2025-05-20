@@ -1,5 +1,5 @@
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import torch, evaluate, argparse
 from datasets import load_dataset
@@ -110,7 +110,7 @@ def main():
     )
     task.connect(args)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     torch.set_printoptions(threshold=float("inf"))
     eval_metric_type = get_eval_metric_type(args.task)
     global eval_metrics; eval_metrics = evaluate.load(eval_metric_type)
