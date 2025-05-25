@@ -242,8 +242,8 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             V = getattr(self, f"{name}_V")               # (r, in)
             D = self.uiortholora_D[name]                   # (in,)
             E = self.uiortholora_E[name]
-            left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], self.in_features)
-            right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], self.out_features)
+            left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], self.out_features)
+            right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], self.in_features)
             
 
             x_casted = x.to(diag.dtype)
@@ -272,16 +272,17 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         return self._build_projection_matrix(right_unitary.weight, right_size, rank_to_preserve)
     
     def _build_projection_matrix(self, projection_matrix, size, rank_to_preserve):
-        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device=self.device)
-        upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device=self.device)), dim=1)
-        down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device=self.device), projection_matrix), dim=1)
+        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device
+)
+        upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device = self.get_base_layer().weight.device)), dim=1)
+        down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device), projection_matrix), dim=1)
         return torch.cat((upper_matrix, down_matrix), dim=0)
     
     def _calc_sigma(self, adapter, left_size, right_size):
         max_rank = min(left_size, right_size)
         not_trainable_part_size = max_rank - self.num_svalues_to_adapt
-        sigma = torch.zeros(max_rank, max_rank, device=self.device)
-        sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device=self.device)
+        sigma = torch.zeros(max_rank, max_rank, device = self.get_base_layer().weight.device)
+        sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device = self.get_base_layer().weight.device)
         if self._meta[adapter]["pos"]:
             non_trainable = torch.diag(torch.relu(adapter))
         else:
