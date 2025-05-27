@@ -29,6 +29,8 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         self.device = self.base_layer.weight.device
         self._meta: Dict[str, dict] = {}
         self.kwargs = kwargs
+        self.num_svalues_to_adapt = kwargs.pop("num_svalues_to_adapt")
+        self.num_svectors_to_adapt = kwargs.pop("num_svectors_to_adapt")
 
     @property
     def merged(self) -> bool:
@@ -45,9 +47,7 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         initial_sigma: Optional[float] = 1e-1,
         **kwargs,
     ):
-        
-        print("kwargs: ", kwargs)
-
+            
         if adapter_name in self.uiortholora_sigma.keys():
             return
 
@@ -64,12 +64,13 @@ class UIOrthoLoRALayer(BaseTunerLayer):
             base_w = base_w.view(1, -1)
 
         # Compute SVD and slice the smallest singular vectors
-        U, S, Vh = torch.linalg.svd(base_w.float(), full_matrices=False)
-        ids = torch.argsort(S)[:self.num_svalues_to_adapt]
-        U_r, V_r = U[:, ids], Vh[ids, :]
+        U, S, Vt = torch.linalg.svd(base_w.float(), full_matrices=True)
+        if self.num_svalues_to_adapt == 0:
+            ids = torch.argsort(S)[:self.num_svalues_to_adapt]
+            U, Vt = U[:, ids], Vt[ids, :]
 
-        self.register_buffer(f"{adapter_name}_U", U_r.detach(), persistent=True)
-        self.register_buffer(f"{adapter_name}_V", V_r.detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_U", U.detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_Vt", Vt.detach(), persistent=True)
 
         # Initialize parameters with provided values or defaults
         self.uiortholora_sigma[adapter_name] = nn.Parameter(torch.full((self.num_svalues_to_adapt,), initial_sigma))
@@ -118,7 +119,6 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         uiortholora_alpha: float = 1.0,
         uiortholora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,
-        init_uiortholora_weights: bool = True,
         **kwargs,
     ) -> None:
         # Initialize nn.Linear with the base layer's parameters
@@ -126,11 +126,6 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         # Initialize UIOrthoLoRALayer
         UIOrthoLoRALayer.__init__(self, base_layer, **kwargs)
         self.fan_in_fan_out = fan_in_fan_out
-        self.num_svalues_to_adapt = kwargs.pop("num_svalues_to_adapt")
-        self.num_svectors_to_adapt = kwargs.pop("num_svectors_to_adapt")
-
-        print("num_svalues_to_adapt: ", self.num_svalues_to_adapt)
-        print("num_svectors_to_adapt: ", self.num_svectors_to_adapt)
 
         self._active_adapter = adapter_name
         self.update_layer(
@@ -140,33 +135,32 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             uiortholora_alpha=uiortholora_alpha,
             uiortholora_dropout=uiortholora_dropout,
             initial_scaler=kwargs.pop("initial_scaler"),
-            initial_sigma=kwargs.pop("initial_sigma"),
-            init_uiortholora_weights=init_uiortholora_weights)
+            initial_sigma=kwargs.pop("initial_sigma"))
 
     def get_delta_weight(self, adapter: str) -> torch.Tensor:
         """
-        Return the effective weight matrix of the adapter: ΔW = E * U * Σ * V * D
+        Return the effective weight matrix of the adapter: ΔW = E * Q * U * Σ * (V * P).T * D
 
         This is a proper, differentiable version safe for inspection or merging.
         """
         diag = self.uiortholora_sigma[adapter]
-        if self._meta[adapter]["pos"]:
-            diag = torch.relu(diag.clone())
+        # if self._meta[adapter]["pos"]:
+        #     diag = torch.relu(diag.clone())
 
-        U = getattr(self, f"{adapter}_U")         # (out, r)
-        V = getattr(self, f"{adapter}_V")         # (r, in)
-        D = self.uiortholora_D[adapter]             # (in,)
-        E = self.uiortholora_E[adapter]             # (out,)
+        U = getattr(self, f"{adapter}_U")
+        Vt = getattr(self, f"{adapter}_Vt")
+
+        D = self.uiortholora_D[adapter]
+        E = self.uiortholora_E[adapter]
         left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[adapter], self.in_features)
         right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[adapter], self.out_features)
-
         # Broadcast D and E
-        VD = V * D.unsqueeze(0).clone()                   # (r, in)
-        UE = U * E.unsqueeze(1).clone()                   # (out, r)
+        VtD = Vt * D.unsqueeze(0).clone()
+        EQ = left_unitary * E.unsqueeze(1).clone()
 
-        Σ = torch.diag(diag)                      # (r, r)
+        Σ = self._calc_sigma(diag, self.in_features, self.out_features)
 
-        core = UE @ left_unitary @ Σ @ right_unitary @ VD                        # (out, in)
+        core = EQ @ U @ Σ @ right_unitary.T @ VtD
         return self._meta[adapter]["sf"] * core.to(self.get_base_layer().weight.dtype)
 
 
@@ -239,7 +233,7 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
                 diag = torch.relu(diag)
 
             U = getattr(self, f"{name}_U")               # (out, r)
-            V = getattr(self, f"{name}_V")               # (r, in)
+            Vt = getattr(self, f"{name}_Vt")               # (r, in)
             D = self.uiortholora_D[name]                   # (in,)
             E = self.uiortholora_E[name]
             left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], self.out_features)
@@ -248,9 +242,10 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
 
             x_casted = x.to(diag.dtype)
             
-            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (V @ right_unitary.T) * D.unsqueeze(0))  # (B, r)
-            x_proj = x_proj * diag                                                  # (B, r)
-            delta = F.linear(x_proj, (left_unitary @ U) * E.unsqueeze(1))                             # (B, out)
+            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (right_unitary.T @ Vt) * D.unsqueeze(0))
+            sigma = self._calc_sigma(diag, self.in_features, self.out_features)
+            x_proj = x_proj @ sigma
+            delta = F.linear(x_proj, (left_unitary @ U) * E.unsqueeze(1))
 
             result = result + self._meta[name]["sf"] * delta
 
@@ -272,22 +267,18 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         return self._build_projection_matrix(right_unitary.weight, right_size, rank_to_preserve)
     
     def _build_projection_matrix(self, projection_matrix, size, rank_to_preserve):
-        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device
-)
+        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device)
         upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device = self.get_base_layer().weight.device)), dim=1)
         down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device), projection_matrix), dim=1)
         return torch.cat((upper_matrix, down_matrix), dim=0)
     
-    def _calc_sigma(self, adapter, left_size, right_size):
+    def _calc_sigma(self, diag_values, left_size, right_size):
         max_rank = min(left_size, right_size)
         not_trainable_part_size = max_rank - self.num_svalues_to_adapt
         sigma = torch.zeros(max_rank, max_rank, device = self.get_base_layer().weight.device)
         sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device = self.get_base_layer().weight.device)
-        if self._meta[adapter]["pos"]:
-            non_trainable = torch.diag(torch.relu(adapter))
-        else:
-            non_trainable = torch.diag(adapter)
-        sigma[not_trainable_part_size:, not_trainable_part_size:] = non_trainable
+
+        sigma[not_trainable_part_size:, not_trainable_part_size:] = torch.diag(diag_values)
         
         if max_rank < left_size:
             sigma = torch.cat((sigma, torch.zeros(left_size - max_rank, max_rank)), dim=0)
@@ -295,8 +286,3 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             sigma = torch.cat((sigma, torch.zeros(max_rank, right_size - max_rank)), dim=1)
         
         return sigma
-
-
-
-
-
