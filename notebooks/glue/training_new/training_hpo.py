@@ -1,26 +1,28 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
 from training import train_model
 import argparse
 from itertools import product
 
 # Config
-task_name = "sst2"
-gpu_id = "1"
-epochs = 160
+task_name = "rte"
+epochs = 30
 batch_size = 64
 max_len = 256
 base_model_id = "roberta-base"
 model_type = "uiortholora"
 uiortholora_alpha = 1
 uiortholora_dropout = 0
-target_modules = ["q_proj", "v_proj"]
+target_modules = ["attention.output.dense", "query", "key", "value"]
 
 # Define search space
-num_svalues_to_adapt = [128, 256]
-num_svectors_to_adapt = [40, 80]
-head_lrs = [5e-3]
-adapter_lrs = [5e-3]
-initial_scalers = [1e-1]
-initial_sigmas  = [1e-1]
+num_svalues_to_adapt = [128]
+num_svectors_to_adapt = [60]
+head_lrs = [5e-4, 1e-3, 5e-3, 1e-2]
+adapter_lrs = [1e-3, 5e-3, 1e-2, 4e-2]
+initial_scalers = [1e-1, 1e-2]
+initial_sigmas  = [1e-1, 1e-2]
 
 # Cartesian product of all configs
 search_space = list(product(
@@ -43,7 +45,6 @@ for i, (num_svalues, num_svectors, head_lr, adapter_lr, scaler, sigma) in enumer
         initial_sigma=sigma,
         batch_size=batch_size,
         max_len=max_len,
-        cuda_visible_devices=gpu_id,
         base_model_id=base_model_id,
         model_type=model_type,
         uiortholora_alpha=uiortholora_alpha,

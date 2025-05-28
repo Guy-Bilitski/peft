@@ -3,7 +3,7 @@ import torch, evaluate
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification,
-    TrainingArguments, BitsAndBytesConfig, Trainer
+    TrainingArguments, Trainer
 )
 from peft import UIOrthoLoRAConfig, UILinLoRAConfig, get_peft_model, TaskType
 from datetime import datetime
@@ -89,9 +89,9 @@ def print_trainable_params(model):
     print(f"Trainable %: {100 * trainable / total:.8f}%")
 
 
-def write_results(score, timestamp, args, base_dir="results"):
+def write_results(score, timestamp, args, base_dir="results/glue"):
     os.makedirs(base_dir, exist_ok=True)
-    excel_path = os.path.join(base_dir, f"{args.method_name.lower()}.xlsx")
+    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}.csv")
 
     row = {
         "num_svalues": args.num_svalues_to_adapt,
@@ -104,22 +104,22 @@ def write_results(score, timestamp, args, base_dir="results"):
         "timestamp": timestamp
     }
 
-    try:
-        with pd.ExcelWriter(excel_path, mode="a", engine="openpyxl", if_sheet_exists="overlay") as writer:
-            df = pd.DataFrame([row])
-            df.to_excel(writer, sheet_name=args.task, index=False, header=not writer.sheets.get(args.task))
-    except FileNotFoundError:
-        with pd.ExcelWriter(excel_path, mode="w", engine="openpyxl") as writer:
-            df = pd.DataFrame([row])
-            df.to_excel(writer, sheet_name=args.task, index=False)
+    df = pd.DataFrame([row])
 
-def is_duplicate_run(args, base_dir="results"):
-    excel_path = os.path.join(base_dir, f"{args.method_name.lower()}.xlsx")
-    if not os.path.exists(excel_path):
+    # Append or create the CSV
+    if os.path.exists(csv_path):
+        df.to_csv(csv_path, mode='a', index=False, header=False)
+    else:
+        df.to_csv(csv_path, mode='w', index=False, header=True)
+
+
+def is_duplicate_run(args, base_dir="results/glue"):
+    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}.csv")
+    if not os.path.exists(csv_path):
         return False  # No file yet
 
     try:
-        df_existing = pd.read_excel(excel_path, sheet_name=args.task)
+        df_existing = pd.read_csv(csv_path)
         duplicate = df_existing[
             (df_existing["num_svalues"] == args.num_svalues_to_adapt) &
             (df_existing["num_svectors"] == args.num_svectors_to_adapt) &
@@ -135,7 +135,9 @@ def is_duplicate_run(args, base_dir="results"):
 
 
 
+
 def get_peft_config(args):
+    print(args)
     if args.model_type == "uiortholora":
         return UIOrthoLoRAConfig(
                 target_modules=args.target_modules,
@@ -167,9 +169,9 @@ def set_contiguous(model):
             if not base.is_contiguous():
                 base.data = base.data.contiguous()
 
-def prepare_trainer(model, args, data, tokenizer, eval_metric_type):
+def prepare_trainer(model, args, data, tokenizer, eval_metric_type, timestamp):
     train_args = TrainingArguments(
-        output_dir=f"uiortholora-roberta-base-{args.task}",
+        output_dir = f"outputs/{args.model_type.lower()}_{args.base_model_id.replace('/', '-')}_{args.task}_{timestamp}",
         per_device_train_batch_size=args.batch_size,
         num_train_epochs=args.epochs,
         eval_strategy="epoch",
@@ -210,7 +212,6 @@ def train_model(args):
     )
     task.connect(args)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     torch.set_printoptions(threshold=float("inf"))
     eval_metric_type = get_eval_metric_type(args.task)
     global eval_metrics; eval_metrics = evaluate.load(eval_metric_type)
@@ -239,10 +240,12 @@ def train_model(args):
 
     data = prepare_dataset(tokenizer, task=args.task, max_len=args.max_len)
 
-    trainer = prepare_trainer(model, args, data, tokenizer, eval_metric_type)
+    trainer = prepare_trainer(model, args, data, tokenizer, eval_metric_type, timestamp)
 
     trainer.train()
 
     score = trainer.evaluate()[f"eval_{eval_metric_type}"]
     print(f"Final {eval_metric_type}:", score)
     write_results(score, timestamp, args)
+    task.close()
+
