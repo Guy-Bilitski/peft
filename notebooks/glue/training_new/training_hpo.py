@@ -43,6 +43,51 @@ if task_name == "mrpc":
     initial_scalers = [1e-1, 1e-2]
     initial_sigmas  = [1e-1, 1e-2]
 
+if task_name == "qlni":
+    epochs = 10
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
+    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "sts-b":
+    epochs = 20
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "sst2":
+    epochs = 12
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
+    adapter_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "qnli":
+    epochs = 10
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
+    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "qqp":
+    epochs = 10
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
+    adapter_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
 # Cartesian product of all configs
 search_space = list(product(
     num_svalues_to_adapt, num_svectors_to_adapt,
