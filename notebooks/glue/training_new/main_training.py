@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--uiortholora_alpha", type=float)
     parser.add_argument("--uiortholora_dropout", type=float)
     parser.add_argument("--target_modules", nargs="+")               # e.g., ["q_proj", "v_proj"]
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
 
     args = parser.parse_args()
     train_model(args)

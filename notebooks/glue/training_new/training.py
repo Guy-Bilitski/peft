@@ -114,6 +114,8 @@ def write_results(score, timestamp, args, base_dir="results/glue"):
 
 
 def is_duplicate_run(args, base_dir="results/glue"):
+    if getattr(args, "resume_from_checkpoint", None):
+        return False
     csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}.csv")
     if not os.path.exists(csv_path):
         return False  # No file yet
@@ -242,7 +244,12 @@ def train_model(args):
 
     trainer = prepare_trainer(model, args, data, tokenizer, eval_metric_type, timestamp)
 
-    trainer.train()
+    if getattr(args, "resume_from_checkpoint", None):
+        print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
+        trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    else:
+        trainer.train()
+
 
     score = trainer.evaluate()[f"eval_{eval_metric_type}"]
     print(f"Final {eval_metric_type}:", score)

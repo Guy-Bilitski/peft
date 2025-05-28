@@ -1,13 +1,12 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 from training import train_model
 import argparse
 from itertools import product
 
 # Config
-task_name = "rte"
-epochs = 30
+task_name = "mrpc"
 batch_size = 64
 max_len = 256
 base_model_id = "roberta-base"
@@ -17,12 +16,32 @@ uiortholora_dropout = 0
 target_modules = ["attention.output.dense", "query", "key", "value"]
 
 # Define search space
-num_svalues_to_adapt = [128]
-num_svectors_to_adapt = [60]
-head_lrs = [5e-4, 1e-3, 5e-3, 1e-2]
-adapter_lrs = [1e-3, 5e-3, 1e-2, 4e-2]
-initial_scalers = [1e-1, 1e-2]
-initial_sigmas  = [1e-1, 1e-2]
+if task_name == "rte":
+    epochs = 30
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [5e-4, 5e-3, 1e-2, 5e-2]
+    adapter_lrs = [1e-3, 5e-3, 1e-2, 5e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "cola":
+    epochs = 20
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
+
+if task_name == "mrpc":
+    epochs = 10
+    num_svalues_to_adapt = [128]
+    num_svectors_to_adapt = [60]
+    head_lrs = [5e-4, 1e-3, 5e-3, 1e-2]
+    adapter_lrs = [1e-3, 5e-3, 1e-2, 4e-2]
+    initial_scalers = [1e-1, 1e-2]
+    initial_sigmas  = [1e-1, 1e-2]
 
 # Cartesian product of all configs
 search_space = list(product(

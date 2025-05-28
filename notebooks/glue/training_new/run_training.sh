@@ -1,9 +1,9 @@
 LOGFILE="output_$(date +'%Y%m%d_%H%M%S').log"
 
-CUDA_VISIBLE_DEVICES=1 nohup python main_training.py \
-    --epochs 2 \
+CUDA_VISIBLE_DEVICES=0 nohup python main_training.py \
+    --epochs 60 \
     --seed 42 \
-    --task cola \
+    --task sst2 \
     --num_svalues_to_adapt 128 \
     --num_svectors_to_adapt 60 \
     --head_lr 4e-4 \
@@ -17,6 +17,7 @@ CUDA_VISIBLE_DEVICES=1 nohup python main_training.py \
     --uiortholora_alpha 1 \
     --uiortholora_dropout 0 \
     --target_modules attention.output.dense query key value \
+    --resume_from_checkpoint outputs/uiortholora_roberta-base_sst2/checkpoint-23166 \
     > "$LOGFILE" 2>&1 &
 
 echo "Training launched. Logs: $LOGFILE"
