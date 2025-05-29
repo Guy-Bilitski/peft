@@ -6,7 +6,7 @@ import argparse
 from itertools import product
 
 # Config
-task_name = "mrpc"
+task_name = "sst2"
 batch_size = 64
 max_len = 256
 base_model_id = "roberta-base"
