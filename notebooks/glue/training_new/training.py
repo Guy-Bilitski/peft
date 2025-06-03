@@ -30,29 +30,41 @@ class UIOrthoLoRATrainer(Trainer):
         return self.optimizer
 
 # ---------------------------  helpers  --------------------------- #
+TASK_COLUMNS = {
+    "cola":  ("sentence", None),
+    "sst2":  ("sentence", None),
+    "mrpc":  ("sentence1", "sentence2"),
+    "rte":   ("sentence1", "sentence2"),
+    "wnli":  ("sentence1", "sentence2"),
+    "stsb":  ("sentence1", "sentence2"),   # note: dataset id is "stsb", not "sts-b"
+    "qqp":   ("question1", "question2"),
+    "qnli":  ("question", "sentence"),
+    "mnli":  ("premise",  "hypothesis"),
+}
+
 def prepare_dataset(tokenizer, max_len=128, task="sst2"):
-    ds = load_dataset("glue", task)
-    
-    def tokenize_function(examples):
-        if task in ["sst2", "cola"]:
-            # Single sentence tasks
+    cfg = "stsb" if task.lower() == "sts-b" else task.lower()
+    ds = load_dataset("glue", cfg)
+
+    c1, c2 = TASK_COLUMNS[cfg]
+
+    def tok(ex):
+        if c2 is None:                              # single-sentence tasks
             return tokenizer(
-                examples["sentence"],
+                ex[c1],
                 truncation=True,
                 padding="max_length",
-                max_length=max_len
+                max_length=max_len,
             )
-        elif task in ["mrpc", "qnli", "rte", "wnli", "mnli", "qqp", "sts-b"]:
-            # Two sentence tasks
-            return tokenizer(
-                examples["sentence1"],
-                examples["sentence2"],
-                truncation=True,
-                padding="max_length",
-                max_length=max_len
-            )
-    
-    ds = ds.map(tokenize_function, batched=True)
+        return tokenizer(                           # sentence-pair tasks
+            ex[c1],
+            ex[c2],
+            truncation=True,
+            padding="max_length",
+            max_length=max_len,
+        )
+
+    ds = ds.map(tok, batched=True)
     ds = ds.rename_column("label", "labels")
     ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
     return ds

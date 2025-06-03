@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from training import train_model
 import argparse
@@ -22,8 +22,8 @@ if task_name == "rte":
     num_svectors_to_adapt = [60]
     head_lrs = [5e-4, 5e-3, 1e-2, 5e-2]
     adapter_lrs = [1e-3, 5e-3, 1e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "cola":
     epochs = 20
@@ -35,13 +35,13 @@ if task_name == "cola":
     initial_sigmas  = [1e-1, 1e-2]
 
 if task_name == "mrpc":
-    epochs = 10
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [5e-4, 1e-3, 5e-3, 1e-2]
-    adapter_lrs = [1e-3, 5e-3, 1e-2, 4e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    epochs = 30
+    num_svalues_to_adapt = [64, 96, 160, 192, 224]
+    num_svectors_to_adapt = [15, 30, 45, 60, 75, 90, 105]
+    head_lrs = [1e-3]
+    adapter_lrs = [4e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "qlni":
     epochs = 10
@@ -49,8 +49,8 @@ if task_name == "qlni":
     num_svectors_to_adapt = [60]
     head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
     adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "sts-b":
     epochs = 20
@@ -58,8 +58,8 @@ if task_name == "sts-b":
     num_svectors_to_adapt = [60]
     head_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
     adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "sst2":
     epochs = 12
@@ -67,8 +67,8 @@ if task_name == "sst2":
     num_svectors_to_adapt = [60]
     head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
     adapter_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "qnli":
     epochs = 10
@@ -76,8 +76,8 @@ if task_name == "qnli":
     num_svectors_to_adapt = [60]
     head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
     adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 if task_name == "qqp":
     epochs = 10
@@ -85,8 +85,8 @@ if task_name == "qqp":
     num_svectors_to_adapt = [60]
     head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
     adapter_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
 
 # Cartesian product of all configs
 search_space = list(product(
