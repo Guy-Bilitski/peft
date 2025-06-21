@@ -7,7 +7,7 @@ from transformers import (
 )
 from peft import UIOrthoLoRAConfig, UILinLoRAConfig, get_peft_model, TaskType
 from datetime import datetime
-from clearml import Task
+# from clearml import Task
 import pandas as pd
 
 
@@ -30,29 +30,41 @@ class UIOrthoLoRATrainer(Trainer):
         return self.optimizer
 
 # ---------------------------  helpers  --------------------------- #
+TASK_COLUMNS = {
+    "cola":  ("sentence", None),
+    "sst2":  ("sentence", None),
+    "mrpc":  ("sentence1", "sentence2"),
+    "rte":   ("sentence1", "sentence2"),
+    "wnli":  ("sentence1", "sentence2"),
+    "stsb":  ("sentence1", "sentence2"),   # note: dataset id is "stsb", not "sts-b"
+    "qqp":   ("question1", "question2"),
+    "qnli":  ("question", "sentence"),
+    "mnli":  ("premise",  "hypothesis"),
+}
+
 def prepare_dataset(tokenizer, max_len=128, task="sst2"):
-    ds = load_dataset("glue", task)
-    
-    def tokenize_function(examples):
-        if task in ["sst2", "cola"]:
-            # Single sentence tasks
+    cfg = "stsb" if task.lower() == "sts-b" else task.lower()
+    ds = load_dataset("glue", cfg)
+
+    c1, c2 = TASK_COLUMNS[cfg]
+
+    def tok(ex):
+        if c2 is None:                              # single-sentence tasks
             return tokenizer(
-                examples["sentence"],
+                ex[c1],
                 truncation=True,
                 padding="max_length",
-                max_length=max_len
+                max_length=max_len,
             )
-        elif task in ["mrpc", "qnli", "rte", "wnli", "mnli", "qqp", "sts-b"]:
-            # Two sentence tasks
-            return tokenizer(
-                examples["sentence1"],
-                examples["sentence2"],
-                truncation=True,
-                padding="max_length",
-                max_length=max_len
-            )
-    
-    ds = ds.map(tokenize_function, batched=True)
+        return tokenizer(                           # sentence-pair tasks
+            ex[c1],
+            ex[c2],
+            truncation=True,
+            padding="max_length",
+            max_length=max_len,
+        )
+
+    ds = ds.map(tok, batched=True)
     ds = ds.rename_column("label", "labels")
     ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
     return ds
@@ -91,7 +103,7 @@ def print_trainable_params(model):
 
 def write_results(score, timestamp, args, base_dir="results/glue"):
     os.makedirs(base_dir, exist_ok=True)
-    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}.csv")
+    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}_seeds2.csv")
 
     row = {
         "num_svalues": args.num_svalues_to_adapt,
@@ -101,6 +113,7 @@ def write_results(score, timestamp, args, base_dir="results/glue"):
         "scaler": args.initial_scaler,
         "sigma": args.initial_sigma,
         "score": round(score, 8),
+        "seed": args.seed,
         "timestamp": timestamp
     }
 
@@ -128,7 +141,8 @@ def is_duplicate_run(args, base_dir="results/glue"):
             (df_existing["head_lr"] == args.head_lr) &
             (df_existing["adapter_lr"] == args.adapter_lr) &
             (df_existing["scaler"] == args.initial_scaler) &
-            (df_existing["sigma"] == args.initial_sigma)
+            (df_existing["sigma"] == args.initial_sigma) &
+            (df_existing["seed"] == args.seed)
         ]
         return not duplicate.empty
     except Exception as e:
@@ -208,11 +222,11 @@ def train_model(args):
         return
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    task = Task.init(
-        project_name="GLUE benchmark",
-        task_name=f"UIOrthoLoRA tuner - {args.task} - {timestamp}"
-    )
-    task.connect(args)
+    # task = Task.init(
+    #     project_name="GLUE benchmark",
+    #     task_name=f"UIOrthoLoRA tuner - {args.task} - {timestamp}"
+    # )
+    # task.connect(args)
 
     torch.set_printoptions(threshold=float("inf"))
     eval_metric_type = get_eval_metric_type(args.task)
@@ -254,5 +268,5 @@ def train_model(args):
     score = trainer.evaluate()[f"eval_{eval_metric_type}"]
     print(f"Final {eval_metric_type}:", score)
     write_results(score, timestamp, args)
-    task.close()
+    # task.close()
 

@@ -13,6 +13,7 @@ from peft.utils import (
     ModulesToSaveWrapper,
     _get_submodules,
 )
+from transformers.pytorch_utils import Conv1D
 from peft.import_utils import is_bnb_available, is_bnb_4bit_available
 
 from .config import UIOrthoLoRAConfig
@@ -82,7 +83,7 @@ class UIOrthoLoRAModel(BaseTuner):
         base = target.get_base_layer() if hasattr(target, "get_base_layer") else target
 
         # 2. Check valid types
-        valid_linear_types = (nn.Linear, Linear4bit, Linear8bitLt)
+        valid_linear_types = (nn.Linear, Conv1D, Linear4bit, Linear8bitLt)
         if not isinstance(base, valid_linear_types + (torch.nn.Conv1d,)):
             return
 
@@ -168,20 +169,32 @@ class UIOrthoLoRAModel(BaseTuner):
             cls = Linear4bit
             kwargs = fourbit_kwargs
 
-        else:
+        elif isinstance(target_base, torch.nn.Linear):
             # plain FP32/FP16 path
             cls = Linear
             # fan_in_fan_out sanity like VeRA
             if isinstance(target_base, nn.Linear) and kwargs.get("fan_in_fan_out", False):
                 warnings.warn("fan_in_fan_out=True on torch.nn.Linear – forcing to False.")
                 kwargs["fan_in_fan_out"] = uiortholora_config.fan_in_fan_out = False
-
-        # mark conv1d layers
-        if hasattr(torch.nn, "Conv1d") and isinstance(target_base, torch.nn.Conv1d):
-            kwargs["is_target_conv_1d_layer"] = True
+        
+        elif isinstance(target_base, Conv1D):
+            cls = Linear
             if not kwargs.get("fan_in_fan_out", False):
                 warnings.warn("Conv1d needs fan_in_fan_out=True – forcing it.")
                 kwargs["fan_in_fan_out"] = uiortholora_config.fan_in_fan_out = True
+        
+        else:
+            raise ValueError(
+                f"Target module {target} is not supported. Currently, only the following modules are supported: "
+                "`torch.nn.Linear`, `transformers.pytorch_utils.Conv1D`."
+            )
+
+        # # mark conv1d layers
+        # if hasattr(torch.nn, "Conv1d") and isinstance(target_base, torch.nn.Conv1d):
+        #     kwargs["is_target_conv_1d_layer"] = True
+        #     if not kwargs.get("fan_in_fan_out", False):
+        #         warnings.warn("Conv1d needs fan_in_fan_out=True – forcing it.")
+        #         kwargs["fan_in_fan_out"] = uiortholora_config.fan_in_fan_out = True
 
         # ── common args forwarded to every wrapper ────────────────────────
         common = dict(

@@ -1,12 +1,14 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["TRANSFORMERS_NO_CLEARML"] = "1"
+os.environ["CLEARML_DISABLE_SUBPROCESS_DETECTION"] = "1"
 
 from training import train_model
 import argparse
 from itertools import product
 
 # Config
-task_name = "sst2"
+task_name = "rte"
 batch_size = 64
 max_len = 256
 base_model_id = "roberta-base"
@@ -17,40 +19,44 @@ target_modules = ["attention.output.dense", "query", "key", "value"]
 
 # Define search space
 if task_name == "rte":
-    epochs = 30
+    epochs = 80
     num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [5e-4, 5e-3, 1e-2, 5e-2]
-    adapter_lrs = [1e-3, 5e-3, 1e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    num_svectors_to_adapt = [45]
+    head_lrs = [3e-4]
+    adapter_lrs = [8e-3]
+    initial_scalers = [1e-2]
+    initial_sigmas  = [1e-2]
+    seeds = [42, 123, 2021, 17, 31415]
 
 if task_name == "cola":
-    epochs = 20
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    epochs = 80
+    num_svalues_to_adapt = [64, 160]
+    num_svectors_to_adapt = [30, 90]
+    head_lrs = [5e-3]
+    adapter_lrs = [3e-2]
+    initial_scalers = [1e-2]
+    initial_sigmas  = [1e-1]
+    seeds = [42, 123, 2021, 17, 31415]
 
 if task_name == "mrpc":
-    epochs = 10
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [5e-4, 1e-3, 5e-3, 1e-2]
-    adapter_lrs = [1e-3, 5e-3, 1e-2, 4e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    epochs = 30
+    num_svalues_to_adapt = [96]
+    num_svectors_to_adapt = [30]
+    head_lrs = [1e-3]
+    adapter_lrs = [4e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
+    seeds = [42, 123, 2021, 17, 31415]
 
-if task_name == "qlni":
+if task_name == "qnli":
     epochs = 10
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
-    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    num_svalues_to_adapt = [64, 96, 160, 192, 224]
+    num_svectors_to_adapt = [15, 30, 45, 60, 75, 90, 105]
+    head_lrs = [1e-3]
+    adapter_lrs = [3e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
+    seeds = [42]
 
 if task_name == "sts-b":
     epochs = 20
@@ -58,26 +64,20 @@ if task_name == "sts-b":
     num_svectors_to_adapt = [60]
     head_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
     adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
+    seeds = [42]
 
 if task_name == "sst2":
-    epochs = 12
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
-    adapter_lrs = [1e-3, 4e-3, 1e-2, 4e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    epochs = 60
+    num_svalues_to_adapt = [64]
+    num_svectors_to_adapt = [30]
+    head_lrs = [1e-2]
+    adapter_lrs = [4e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
+    seeds = [42, 123, 2021, 17, 31415]
 
-if task_name == "qnli":
-    epochs = 10
-    num_svalues_to_adapt = [128]
-    num_svectors_to_adapt = [60]
-    head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
-    adapter_lrs = [5e-3, 1e-2, 3e-2, 5e-2]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
 
 if task_name == "qqp":
     epochs = 10
@@ -85,22 +85,25 @@ if task_name == "qqp":
     num_svectors_to_adapt = [60]
     head_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
     adapter_lrs = [1e-4, 5e-4, 1e-3, 5e-3]
-    initial_scalers = [1e-1, 1e-2]
-    initial_sigmas  = [1e-1, 1e-2]
+    initial_scalers = [1e-1]
+    initial_sigmas  = [1e-1]
+    seeds = [42]
 
 # Cartesian product of all configs
 search_space = list(product(
     num_svalues_to_adapt, num_svectors_to_adapt,
-    head_lrs, adapter_lrs, initial_scalers, initial_sigmas
+    head_lrs, adapter_lrs, initial_scalers, initial_sigmas, seeds
 ))
 
-for i, (num_svalues, num_svectors, head_lr, adapter_lr, scaler, sigma) in enumerate(search_space):
+# search_space = [(160, 90, 5e-3, 3e-2, 1e-2, 1e-1), (64, 60, 5e-3, 3e-2, 1e-2, 1e-1), (64, 30, 5e-3, 3e-2, 1e-2, 1e-1)]
+
+for i, (num_svalues, num_svectors, head_lr, adapter_lr, scaler, sigma, seed) in enumerate(search_space):
     print(f"\n=== Run {i+1}/{len(search_space)} ===")
 
     args = argparse.Namespace(
         task=task_name,
         epochs=epochs,
-        seed=42,
+        seed=seed,
         num_svalues_to_adapt=num_svalues,
         num_svectors_to_adapt=num_svectors,
         head_lr=head_lr,
