@@ -1,7 +1,8 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import torch
+from tqdm import tqdm
 import evaluate
 import numpy as np
 from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
@@ -16,6 +17,8 @@ import json
 import numpy as np
 from transformers.trainer_utils import EvalPrediction
 from pycocoevalcap.cider.cider import Cider
+from torch.utils.data import DataLoader
+import datetime
 
 def load_and_prepare(tokenizer, max_length=128):
     """Load E2E dataset and prepare tokenised fields."""
@@ -126,13 +129,13 @@ def compute_metrics(eval_pred):
     # ---- NIST (may not exist on tiny samples) ------------------------
     nist_raw = nist_metric.compute(
                 predictions=pred_strs,
-                references=label_strs
+                references=[[r] for r in label_strs]
               )
-    nist_val = nist_raw.get("nist", nist_raw.get("score"))  # could be None
+    nist_val = nist_raw.get("nist_mt")
 
     # helper to round only numerics
     def _r(x):
-        return round(float(x), 4) if isinstance(x, Number) else x
+        return round(float(x), 4) if isinstance(x, (int, float)) else x
 
     out = {
         "bleu"  : _r(bleu),
@@ -167,6 +170,7 @@ np.random.seed(seed)
 
 
 tokenizer = AutoTokenizer.from_pretrained(model_path)
+tokenizer.padding_side = "left"
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -232,16 +236,92 @@ model = PeftModel.from_pretrained(base_model, "outputs/models")
 trainer.model = model
 
 
-raw = trainer.predict(ds["test"],
-                      max_length=64,
-                      num_beams=1,
-                      per_device_eval_batch_size=8)  # reduce if still freezes
+# raw = trainer.predict(ds["test"])
 
-metrics = compute_metrics((raw.predictions, raw.label_ids))
+model.eval()
+model.cuda()  # move to GPU if not already
+tokenizer.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+
+gen_preds = []
+true_labels = []
+
+dataloader = DataLoader(ds["test"].select(range(100)), batch_size=32, collate_fn=data_collator)
+
+for batch in tqdm(dataloader, desc="Generating outputs"):
+    input_ids = batch["input_ids"].cuda()
+    attention_mask = (input_ids != tokenizer.pad_token_id).long().cuda()
+    labels = batch["labels"]
+    with torch.no_grad():
+        outputs = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=64,
+            num_beams=4,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+    gen_preds.append(outputs.cpu())
+    true_labels.append(labels)
+
+# Stack tensors
+gen_preds = torch.cat(gen_preds, dim=0)
+true_labels = torch.cat(true_labels, dim=0)
+
+# Compute and save metrics
+metrics = compute_metrics((gen_preds, true_labels))
+
+# Add timestamp and training details
+timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+metrics.update({
+    "timestamp": timestamp,
+    "base_model": peft_config.base_model_name_or_path,
+    "num_training_examples": len(ds["train"]),
+    "num_test_examples": len(ds["test"]),
+    "num_training_epochs": training_args.num_train_epochs,
+    "learning_rate": training_args.learning_rate,
+    "batch_size": training_args.per_device_train_batch_size,
+    "num_beams": 4,
+    "max_new_tokens": 64,
+    "num_svalues_to_adapt": orthoLoRAConfig.num_svalues_to_adapt,
+    "num_svectors_to_adapt": orthoLoRAConfig.num_svectors_to_adapt,
+    "uiortholora_alpha": orthoLoRAConfig.uiortholora_alpha,
+    "uiortholora_dropout": orthoLoRAConfig.uiortholora_dropout,
+    "initial_scaler": orthoLoRAConfig.initial_scaler,
+    "initial_sigma": orthoLoRAConfig.initial_sigma,
+    "target_modules": list(orthoLoRAConfig.target_modules) if orthoLoRAConfig.target_modules is not None else None,  # Convert to list if it's a set
+})
+
 Path(training_args.output_dir).mkdir(parents=True, exist_ok=True)
-(Path(training_args.output_dir) / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
-print("Test metrics saved to", training_args.output_dir)
+metrics_file = Path(training_args.output_dir) / "test_metrics.json"
 
+# Load existing metrics if file exists
+existing_metrics = []
+if metrics_file.exists():
+    with open(metrics_file) as f:
+        existing_metrics = json.load(f)
+        if not isinstance(existing_metrics, list):
+            existing_metrics = [existing_metrics]
+
+# Append new metrics
+existing_metrics.append(metrics)
+
+# Helper function to convert sets to lists for JSON serialization
+def convert_sets_to_lists(obj):
+    if isinstance(obj, set):
+        return list(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_sets_to_lists(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_sets_to_lists(item) for item in obj]
+    else:
+        return obj
+
+# Convert any sets to lists before JSON serialization
+existing_metrics = convert_sets_to_lists(existing_metrics)
+
+# Write updated metrics
+metrics_file.write_text(json.dumps(existing_metrics, indent=2))
+print(f"Test metrics saved to {training_args.output_dir} at {timestamp}")
 
 for k, v in metrics.items():
     print(f"{k}: {v:.4f}")
