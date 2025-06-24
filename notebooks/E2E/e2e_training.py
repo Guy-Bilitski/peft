@@ -1,74 +1,23 @@
-#!/usr/bin/env python
-"""
-Fine–tune GPT‑2 on the E2E NLG benchmark with PEFT (LoRA / VeRA) and evaluate with
-BLEU, NIST, METEOR, ROUGE‑L and CIDEr.  
-Usage (LoRA example):
-    python train_e2e_peft.py \
-        --model_name_or_path gpt2-medium \
-        --output_dir runs/gpt2-medium-lora \
-        --peft lora \
-        --num_train_epochs 3
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
-For VeRA (requires PEFT>=0.11.0 or your custom tuner)::
-    python train_e2e_peft.py --peft vera [...]
-
-Notes
------
-* The script treats the task as *conditional generation*: the Meaning‑Representation
-  (MR) string is fed as prompt, the model learns to generate the natural‑language
-  utterance.
-* Only the adapter parameters are updated; the base model is frozen.
-* Metrics are computed on the dev set after every epoch and once on the test set
-  at the end.
-"""
-import argparse
-import json
-from pathlib import Path
-
+import torch
 import evaluate
 import numpy as np
-import torch
-from datasets import load_dataset
+from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
 from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
-    Trainer,
-    TrainingArguments,
+    AutoTokenizer, AutoModelForCausalLM,
+    TrainingArguments, Trainer, DataCollatorForLanguageModeling
 )
-from peft import LoraConfig, get_peft_model
-# ------ (optional) import your VeRA class ------
-try:
-    from peft import VeraConfig  # hypothetical name, adjust if different
-except ImportError:
-    VeraConfig = None
+from datasets import load_dataset
+from numbers import Number
+from pathlib import Path
+import json
+import numpy as np
+from transformers.trainer_utils import EvalPrediction
+from pycocoevalcap.cider.cider import Cider
 
-# ---------------------------------------------------------------------------
-# 1. Argument parsing
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Fine‑tune GPT‑2 on E2E with PEFT")
-    parser.add_argument("--model_name_or_path", type=str, default="gpt2-medium")
-    parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--peft", type=str, choices=["lora", "vera"], default="lora")
-    parser.add_argument("--r", type=int, default=16, help="LoRA rank (ignored for VeRA)")
-    parser.add_argument("--alpha", type=int, default=32, help="LoRA alpha")
-    parser.add_argument("--dropout", type=float, default=0.05)
-    parser.add_argument("--max_length", type=int, default=128)
-    parser.add_argument("--num_train_epochs", type=int, default=3)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=8)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# 2. Dataset & preprocessing
-# ---------------------------------------------------------------------------
-
-def load_and_prepare(tokenizer, max_length):
+def load_and_prepare(tokenizer, max_length=128):
     """Load E2E dataset and prepare tokenised fields."""
     ds = load_dataset("tuetschek/e2e_nlg")
 
@@ -92,27 +41,28 @@ def load_and_prepare(tokenizer, max_length):
         return tokenised
 
     ds = ds.map(linearise, remove_columns=ds["train"].column_names)
-    ds = ds.rename_column("train", "train") if "train" in ds else ds  # HF quirk safety
     return ds
 
 
-# ---------------------------------------------------------------------------
-# 3. Metric computation
-# ---------------------------------------------------------------------------
+
+class CiderMetric:
+    """Wraps pycocoevalcap so it looks like an `evaluate` metric."""
+    def __init__(self):
+        self.scorer = Cider()
+
+    def compute(self, *, predictions, references):
+        # pycocoevalcap expects dicts: {idx: ["sentence"]}
+        hyps = {i: [pred] for i, pred in enumerate(predictions)}
+        refs = {i: [ref]  for i, ref  in enumerate(references)}
+        score, _ = self.scorer.compute_score(refs, hyps)
+        return {"cider": score}
+
+cider_metric = CiderMetric()
+
 bleu_metric = evaluate.load("sacrebleu")
 meteor_metric = evaluate.load("meteor")
 rouge_metric = evaluate.load("rouge")
-
-try:
-    nist_metric = evaluate.load("nist_mt")
-except Exception:
-    nist_metric = None
-
-try:
-    cider_metric = evaluate.load("cider")
-except Exception:
-    cider_metric = None
-
+nist_metric = evaluate.load("nist_mt")
 
 def postprocess_text(preds, labels):
     preds = [p.strip() for p in preds]
@@ -120,111 +70,180 @@ def postprocess_text(preds, labels):
     return preds, labels
 
 
+def set_contiguous(model):
+    for m in model.modules():
+        if hasattr(m, "parametrizations") and "weight" in m.parametrizations:
+            base = m.parametrizations.weight[0].base
+            if not base.is_contiguous():
+                base.data = base.data.contiguous()
+
 def compute_metrics(eval_pred):
-    predictions, labels = eval_pred
+    """Compute BLEU, METEOR, ROUGE-L, (optionally) NIST on E2E-NLG."""
+    preds, labels = eval_pred
+
+    # ── tensors → numpy ───────────────────────────────────────────────
+    if isinstance(preds, torch.Tensor):
+        preds = preds.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+
+    # ── logits → ids if necessary ─────────────────────────────────────
+    if preds.ndim == 3:                      # (batch, seq, vocab)
+        preds = preds.argmax(-1)
+
+    # ── un-mask labels ────────────────────────────────────────────────
+    labels = labels.copy()
     labels[labels == -100] = tokenizer.pad_token_id
-    preds_text = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-    labels_text = tokenizer.batch_decode(labels, skip_special_tokens=True)
-    preds, refs = postprocess_text(preds_text, labels_text)
 
-    # BLEU (SacreBLEU) expects list[str] and list[list[str]]
-    bleu = bleu_metric.compute(predictions=preds, references=[[r] for r in refs])["score"]
+    # ── decode ────────────────────────────────────────────────────────
+    pred_strs  = tokenizer.batch_decode(preds,  skip_special_tokens=True)
+    label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    pred_strs  = [s.strip() for s in pred_strs]
+    label_strs = [s.strip() for s in label_strs]
 
-    meteor = meteor_metric.compute(predictions=preds, references=refs)["meteor"]
-    rougeL = rouge_metric.compute(predictions=preds, references=refs, use_stemmer=True)[
-        "rougeL"
-    ]
+    # ── metrics ───────────────────────────────────────────────────────
+    bleu   = bleu_metric.compute(
+                predictions=pred_strs,
+                references=[[r] for r in label_strs]
+             )["score"]
 
-    output = {"bleu": bleu, "meteor": meteor, "rougeL": rougeL}
+    meteor = meteor_metric.compute(
+                predictions=pred_strs,
+                references=label_strs
+             )["meteor"]
 
-    if nist_metric is not None:
-        try:
-            nist = nist_metric.compute(predictions=preds, references=refs)["score"]
-            output["nist"] = nist
-        except Exception:
-            pass
-    if cider_metric is not None:
-        try:
-            cider = cider_metric.compute(predictions=preds, references=refs)["cider"]
-            output["cider"] = cider
-        except Exception:
-            pass
+    rougeL = rouge_metric.compute(
+                predictions=pred_strs,
+                references=label_strs,
+                use_stemmer=True
+             )["rougeL"]
 
-    return {k: round(v, 4) for k, v in output.items()}
+    cider = cider_metric.compute(
+                predictions=pred_strs,
+                references=label_strs   # wrapper handles dict-conversion
+            )["cider"]
+
+    # ---- NIST (may not exist on tiny samples) ------------------------
+    nist_raw = nist_metric.compute(
+                predictions=pred_strs,
+                references=label_strs
+              )
+    nist_val = nist_raw.get("nist", nist_raw.get("score"))  # could be None
+
+    # helper to round only numerics
+    def _r(x):
+        return round(float(x), 4) if isinstance(x, Number) else x
+
+    out = {
+        "bleu"  : _r(bleu),
+        "meteor": _r(meteor),
+        "rougeL": _r(rougeL),
+        "cider"  : _r(cider),
+    }
+    if nist_val is not None:
+        out["nist"] = _r(nist_val)
+
+    return out
 
 
-# ---------------------------------------------------------------------------
-# 4. Main training routine
-# ---------------------------------------------------------------------------
+orthoLoRAConfig = UIOrthoLoRAConfig(
+    target_modules=["attn.c_attn", "attn.c_proj"],
+    fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
+    initial_scaler         = 0.1,    # scale of the diagonal Σ at init
+    initial_sigma          = 0.1,    # std-dev for the trainable Σ entries
+    uiortholora_alpha      = 1,
+    uiortholora_dropout    = 0,
+    num_svalues_to_adapt   = 2,       # adapt the top-4 singular values
+    num_svectors_to_adapt  = 2,       # adapt the corresponding vectors
+    task_type              = TaskType.CAUSAL_LM
+)
 
-if __name__ == "__main__":
-    args = parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+model_path = "gpt2-medium"
+seed=42
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+torch.manual_seed(seed)
+np.random.seed(seed)
 
-    ds = load_and_prepare(tokenizer, args.max_length)
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path)
-    model.config.pad_token_id = tokenizer.pad_token_id
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-    if args.peft == "lora":
-        peft_cfg = LoraConfig(
-            r=args.r,
-            lora_alpha=args.alpha,
-            lora_dropout=args.dropout,
-            target_modules=[
-                "c_attn",  # GPT‑2 attention projection
-                "c_fc",    # MLP inner proj
-            ],
-            bias="none",
-        )
-    else:  # VeRA
-        if VeraConfig is None:
-            raise ImportError("VeRAConfig not found. Please install your custom PEFT fork.")
-        peft_cfg = VeraConfig(
-            rank=1,
-            dropout=args.dropout,
-            target_modules=["c_attn", "c_fc"],
-        )
+ds = load_and_prepare(tokenizer)
 
-    model = get_peft_model(model, peft_cfg)
-    model.print_trainable_parameters()
+base_model = AutoModelForCausalLM.from_pretrained(model_path)
+base_model.config.pad_token_id = tokenizer.pad_token_id
 
-    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+model = get_peft_model(base_model, orthoLoRAConfig)
 
-    training_args = TrainingArguments(
-        output_dir="outputs",
-        overwrite_output_dir=True,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=64,
-        learning_rate=1e-3,
-        num_train_epochs=2,
-        weight_decay=0.01,
-        fp16=torch.cuda.is_available(),
-        logging_steps=50,
-        report_to="none",
-    )
+set_contiguous(model)
+model.print_trainable_parameters()
 
-    trainer = Trainer(
+data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+
+training_args = TrainingArguments(
+    output_dir="outputs/check",
+    overwrite_output_dir=True,
+    eval_strategy="no",
+    save_strategy="no",
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=64,
+    eval_accumulation_steps=2,
+    learning_rate=1e-3,
+    lr_scheduler_type="linear",
+    label_smoothing_factor=0.1,
+    num_train_epochs=5,
+    weight_decay=0.01,
+    warmup_steps=500,
+    logging_steps=50,
+    save_total_limit=1,
+    report_to="none",
+)
+
+trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=ds["train"],
+        train_dataset=ds["train"].select(range(100)),
         eval_dataset=ds["validation"],
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
 
-    trainer.train()
-    # Final evaluation on the official test split (if provided)
-    if "test" in ds:
-        metrics = trainer.evaluate(ds["test"])
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(args.output_dir) / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
-        print("Test metrics saved to", args.output_dir)
+# # trainer.train()
+# from accelerate import Accelerator
+# accelerator = Accelerator()
+# trainer = accelerator.prepare(trainer)
+# trainer.train()
+
+
+# trainer.save_model("outputs/models")
+
+# Load the trained model from saved checkpoint
+# Load config to get base model info
+peft_config = PeftConfig.from_pretrained("outputs/models")
+
+# Load base model (e.g., GPT2-medium)
+base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path)
+
+# Load the full adapted model (base + adapter weights)
+model = PeftModel.from_pretrained(base_model, "outputs/models")
+
+trainer.model = model
+
+
+raw = trainer.predict(ds["test"],
+                      max_length=64,
+                      num_beams=1,
+                      per_device_eval_batch_size=8)  # reduce if still freezes
+
+metrics = compute_metrics((raw.predictions, raw.label_ids))
+Path(training_args.output_dir).mkdir(parents=True, exist_ok=True)
+(Path(training_args.output_dir) / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
+print("Test metrics saved to", training_args.output_dir)
+
+
+for k, v in metrics.items():
+    print(f"{k}: {v:.4f}")
+
+
