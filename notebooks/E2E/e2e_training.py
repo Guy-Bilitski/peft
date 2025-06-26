@@ -3,8 +3,14 @@ import os
 
 import torch
 from tqdm import tqdm
+import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+
+import torch
+from tqdm import tqdm
 import evaluate
 import numpy as np
+from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
 from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
@@ -62,9 +68,25 @@ class CiderMetric:
 
 cider_metric = CiderMetric()
 
+
+class CiderMetric:
+    """Wraps pycocoevalcap so it looks like an `evaluate` metric."""
+    def __init__(self):
+        self.scorer = Cider()
+
+    def compute(self, *, predictions, references):
+        # pycocoevalcap expects dicts: {idx: ["sentence"]}
+        hyps = {i: [pred] for i, pred in enumerate(predictions)}
+        refs = {i: [ref]  for i, ref  in enumerate(references)}
+        score, _ = self.scorer.compute_score(refs, hyps)
+        return {"cider": score}
+
+cider_metric = CiderMetric()
+
 bleu_metric = evaluate.load("sacrebleu")
 meteor_metric = evaluate.load("meteor")
 rouge_metric = evaluate.load("rouge")
+nist_metric = evaluate.load("nist_mt")
 nist_metric = evaluate.load("nist_mt")
 
 def postprocess_text(preds, labels):
@@ -80,7 +102,29 @@ def set_contiguous(model):
             if not base.is_contiguous():
                 base.data = base.data.contiguous()
 
+def set_contiguous(model):
+    for m in model.modules():
+        if hasattr(m, "parametrizations") and "weight" in m.parametrizations:
+            base = m.parametrizations.weight[0].base
+            if not base.is_contiguous():
+                base.data = base.data.contiguous()
+
 def compute_metrics(eval_pred):
+    """Compute BLEU, METEOR, ROUGE-L, (optionally) NIST on E2E-NLG."""
+    preds, labels = eval_pred
+
+    # ── tensors → numpy ───────────────────────────────────────────────
+    if isinstance(preds, torch.Tensor):
+        preds = preds.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+
+    # ── logits → ids if necessary ─────────────────────────────────────
+    if preds.ndim == 3:                      # (batch, seq, vocab)
+        preds = preds.argmax(-1)
+
+    # ── un-mask labels ────────────────────────────────────────────────
+    labels = labels.copy()
     """Compute BLEU, METEOR, ROUGE-L, (optionally) NIST on E2E-NLG."""
     preds, labels = eval_pred
 
@@ -110,6 +154,81 @@ def compute_metrics(eval_pred):
                 references=[[r] for r in label_strs]
              )["score"]
 
+    # ── decode ────────────────────────────────────────────────────────
+    pred_strs  = tokenizer.batch_decode(preds,  skip_special_tokens=True)
+    label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    pred_strs  = [s.strip() for s in pred_strs]
+    label_strs = [s.strip() for s in label_strs]
+
+    # ── metrics ───────────────────────────────────────────────────────
+    bleu   = bleu_metric.compute(
+                predictions=pred_strs,
+                references=[[r] for r in label_strs]
+             )["score"]
+
+    meteor = meteor_metric.compute(
+                predictions=pred_strs,
+                references=label_strs
+             )["meteor"]
+
+    rougeL = rouge_metric.compute(
+                predictions=pred_strs,
+                references=label_strs,
+                use_stemmer=True
+             )["rougeL"]
+
+    cider = cider_metric.compute(
+                predictions=pred_strs,
+                references=label_strs   # wrapper handles dict-conversion
+            )["cider"]
+
+    # ---- NIST (may not exist on tiny samples) ------------------------
+    nist_raw = nist_metric.compute(
+                predictions=pred_strs,
+                references=[[r] for r in label_strs]
+              )
+    nist_val = nist_raw.get("nist_mt")
+
+    # helper to round only numerics
+    def _r(x):
+        return round(float(x), 4) if isinstance(x, (int, float)) else x
+
+    out = {
+        "bleu"  : _r(bleu),
+        "meteor": _r(meteor),
+        "rougeL": _r(rougeL),
+        "cider"  : _r(cider),
+    }
+    if nist_val is not None:
+        out["nist"] = _r(nist_val)
+
+    return out
+
+print("script started \n", flush=True)
+orthoLoRAConfig = UIOrthoLoRAConfig(
+    target_modules=["attn.c_attn", "attn.c_proj"],
+    fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
+    initial_scaler         = 0.1,    # scale of the diagonal Σ at init
+    initial_sigma          = 0.1,    # std-dev for the trainable Σ entries
+    uiortholora_alpha      = 1,
+    uiortholora_dropout    = 0,
+    num_svalues_to_adapt   = 10,       
+    num_svectors_to_adapt  = 10,       
+    task_type              = TaskType.CAUSAL_LM
+)
+
+print("loading model \n", flush=True)
+model_path = "gpt2-medium"
+seed=42
+
+torch.manual_seed(seed)
+np.random.seed(seed)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+tokenizer.padding_side = "left"
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
     meteor = meteor_metric.compute(
                 predictions=pred_strs,
                 references=label_strs
@@ -175,17 +294,44 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 ds = load_and_prepare(tokenizer)
+ds = load_and_prepare(tokenizer)
 
+# base_model = AutoModelForCausalLM.from_pretrained(model_path)
+# base_model = base_model.to(device)
+# base_model.config.pad_token_id = tokenizer.pad_token_id
 base_model = AutoModelForCausalLM.from_pretrained(model_path)
 base_model.config.pad_token_id = tokenizer.pad_token_id
 
+# model = get_peft_model(base_model, orthoLoRAConfig)
+# print("model loaded \n", flush=True)
+# set_contiguous(model)
+# model.print_trainable_parameters()
 model = get_peft_model(base_model, orthoLoRAConfig)
 
 set_contiguous(model)
 model.print_trainable_parameters()
 
 data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
+training_args = TrainingArguments(
+    output_dir="outputs/check",
+    overwrite_output_dir=True,
+    eval_strategy="no",
+    save_strategy="no",
+    per_device_train_batch_size=4,
+    per_device_eval_batch_size=64,
+    eval_accumulation_steps=2,
+    learning_rate=1e-3,
+    lr_scheduler_type="linear",
+    label_smoothing_factor=0.1,
+    num_train_epochs=5,
+    weight_decay=0.01,
+    warmup_steps=500,
+    logging_steps=50,
+    save_total_limit=1,
+    report_to="none",
+)
 training_args = TrainingArguments(
     output_dir="outputs/check",
     overwrite_output_dir=True,
