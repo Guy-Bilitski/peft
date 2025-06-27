@@ -55,8 +55,6 @@ class CiderMetric:
         score, _ = self.scorer.compute_score(refs, hyps)
         return {"cider": score}
 
-cider_metric = CiderMetric()
-
 def postprocess_text(preds, labels):
     preds = [p.strip() for p in preds]
     labels = [l.strip() for l in labels]
@@ -194,7 +192,7 @@ def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, model_pa
     trainer = Trainer(
         model=orthoLora_model,
         args=training_args,
-        train_dataset=ds["train"].select(range(100)),
+        train_dataset=ds["train"],
         eval_dataset=ds["validation"])
 
     trainer.train()
@@ -204,13 +202,13 @@ def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, model_pa
     return trainer.model
 
 
-def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args):
+def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args, inference_args):
     model.eval()
 
     gen_preds = []
     true_labels = []
 
-    dataloader = DataLoader(ds["test"].select(range(100)), batch_size=32, collate_fn=data_collator)
+    dataloader = DataLoader(ds["test"], batch_size=32, collate_fn=data_collator)
 
     for batch in tqdm(dataloader, desc="Generating outputs"):
         input_ids = batch["input_ids"].cuda()
@@ -220,8 +218,10 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=64,
-                num_beams=4,
+                max_new_tokens=inference_args["max_new_tokens"],
+                num_beams=inference_args["num_beams"],
+                no_repeat_ngram_size=inference_args["no_repeat_ngram_size"],
+                length_penalty=inference_args["length_penalty"],
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
@@ -245,8 +245,10 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
         "num_training_epochs": training_args.num_train_epochs,
         "learning_rate": training_args.learning_rate,
         "batch_size": training_args.per_device_train_batch_size,
-        "num_beams": 4,
-        "max_new_tokens": 64,
+        "num_beams": inference_args["num_beams"],
+        "no_repeat_ngram_size": inference_args["no_repeat_ngram_size"],
+        "length_penalty": inference_args["length_penalty"],
+        "max_new_tokens": inference_args["max_new_tokens"],
         "num_svalues_to_adapt": peft_config.num_svalues_to_adapt,
         "num_svectors_to_adapt": peft_config.num_svectors_to_adapt,
         "uiortholora_alpha": peft_config.uiortholora_alpha,
@@ -289,13 +291,13 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
     print(f"Test metrics saved to {training_args.output_dir} at {timestamp}")
 
     for k, v in metrics.items():
-        if isinstance(v, (int, float)):
+        if isinstance(v, (int, float)): 
             print(f"{k}: {v:.4f}")
         else:
             print(f"{k}: {v}")
 
 
-def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", training_args=None, finetune=False, peft_config=None):
+def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", training_args=None, finetune=False, peft_config=None, inference_args=None):
     print("training and evaluating \n", flush=True)
 
     # set seed and device
@@ -321,4 +323,4 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", tr
         print("Loaded already finetuned model \n", flush=True)
 
     # evaluate model
-    evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args)
+    evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args, inference_args)

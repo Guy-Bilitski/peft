@@ -25,8 +25,8 @@ LORA_CFG = UIOrthoLoRAConfig(
     initial_sigma=0.1,
     uiortholora_alpha=1,
     uiortholora_dropout=0,
-    num_svalues_to_adapt=10,
-    num_svectors_to_adapt=10,
+    num_svalues_to_adapt=96,
+    num_svectors_to_adapt=30,
     task_type=None,  # will be set inside train_and_evaluate
 )
 
@@ -35,7 +35,7 @@ TRAINING_ARGS = TrainingArguments(
     overwrite_output_dir=True,
     eval_strategy="no",
     save_strategy="no",
-    per_device_train_batch_size=4,
+    per_device_train_batch_size=8,
     per_device_eval_batch_size=64,
     eval_accumulation_steps=2,
     learning_rate=1e-3,
@@ -47,6 +47,14 @@ TRAINING_ARGS = TrainingArguments(
     logging_steps=50,
     save_total_limit=1,
     report_to="none")
+
+INFERENCE_ARGS = {
+    "num_beams": 10,
+    "no_repeat_ngram_size": 4,
+    "length_penalty": 0.9,
+    "max_new_tokens": 64,
+}
+
 # ───────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -56,10 +64,12 @@ def main() -> None:
         training_args=TRAINING_ARGS,
         finetune=FINETUNE,
         peft_config=LORA_CFG,
+        inference_args=INFERENCE_ARGS,
     )
 
 
 if __name__ == "__main__":
     # Create output directory if it doesn’t exist
     Path("outputs").mkdir(exist_ok=True)
+    Path("outputs/results").mkdir(exist_ok=True)
     main()
