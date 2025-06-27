@@ -6,10 +6,9 @@ from tqdm import tqdm
 import evaluate
 import numpy as np
 from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
-from transformers import (
-    AutoTokenizer, AutoModelForCausalLM,
-    TrainingArguments, Trainer, DataCollatorForLanguageModeling
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.trainer import Trainer
+from transformers.data.data_collator import DataCollatorForLanguageModeling
 from datasets import load_dataset
 from pathlib import Path
 import json
@@ -44,7 +43,6 @@ def load_and_prepare(tokenizer, max_length=128):
     return ds
 
 
-
 class CiderMetric:
     """Wraps pycocoevalcap so it looks like an `evaluate` metric."""
     def __init__(self):
@@ -58,27 +56,6 @@ class CiderMetric:
         return {"cider": score}
 
 cider_metric = CiderMetric()
-
-
-class CiderMetric:
-    """Wraps pycocoevalcap so it looks like an `evaluate` metric."""
-    def __init__(self):
-        self.scorer = Cider()
-
-    def compute(self, *, predictions, references):
-        # pycocoevalcap expects dicts: {idx: ["sentence"]}
-        hyps = {i: [pred] for i, pred in enumerate(predictions)}
-        refs = {i: [ref]  for i, ref  in enumerate(references)}
-        score, _ = self.scorer.compute_score(refs, hyps)
-        return {"cider": score}
-
-cider_metric = CiderMetric()
-
-bleu_metric = evaluate.load("sacrebleu")
-meteor_metric = evaluate.load("meteor")
-rouge_metric = evaluate.load("rouge")
-nist_metric = evaluate.load("nist_mt")
-nist_metric = evaluate.load("nist_mt")
 
 def postprocess_text(preds, labels):
     preds = [p.strip() for p in preds]
@@ -92,9 +69,15 @@ def set_contiguous(model):
             if not base.is_contiguous():
                 base.data = base.data.contiguous()
 
-def compute_metrics(eval_pred):
+def compute_metrics(eval_pred, tokenizer):
     """Compute BLEU, METEOR, ROUGE-L, (optionally) NIST on E2E-NLG."""
     preds, labels = eval_pred
+
+    cider_metric = CiderMetric()
+    bleu_metric = evaluate.load("sacrebleu")
+    meteor_metric = evaluate.load("meteor")
+    rouge_metric = evaluate.load("rouge")
+    nist_metric = evaluate.load("nist_mt")
 
     # ── tensors → numpy ───────────────────────────────────────────────
     if isinstance(preds, torch.Tensor):
@@ -108,9 +91,6 @@ def compute_metrics(eval_pred):
 
     # ── un-mask labels ────────────────────────────────────────────────
     labels = labels.copy()
-
-    # ── un-mask labels ────────────────────────────────────────────────
-    labels = labels.copy()
     labels[labels == -100] = tokenizer.pad_token_id
 
     # ── decode ────────────────────────────────────────────────────────
@@ -120,252 +100,225 @@ def compute_metrics(eval_pred):
     label_strs = [s.strip() for s in label_strs]
 
     # ── metrics ───────────────────────────────────────────────────────
-    bleu   = bleu_metric.compute(
-                predictions=pred_strs,
-                references=[[r] for r in label_strs]
-             )["score"]
+    out = {}
+    
+    if bleu_metric is not None:
+        bleu = bleu_metric.compute(
+                    predictions=pred_strs,
+                    references=[[r] for r in label_strs]
+                 )["score"]
+        out["bleu"] = round(float(bleu), 4)
 
-    meteor = meteor_metric.compute(
-                predictions=pred_strs,
-                references=label_strs
-             )["meteor"]
+    if meteor_metric is not None:
+        meteor = meteor_metric.compute(
+                    predictions=pred_strs,
+                    references=label_strs
+                 )["meteor"]
+        out["meteor"] = round(float(meteor), 4)
 
-    rougeL = rouge_metric.compute(
-                predictions=pred_strs,
-                references=label_strs,
-                use_stemmer=True
-             )["rougeL"]
+    if rouge_metric is not None:
+        rougeL = rouge_metric.compute(
+                    predictions=pred_strs,
+                    references=label_strs,
+                    use_stemmer=True
+                 )["rougeL"]
+        out["rougeL"] = round(float(rougeL), 4)
 
     cider = cider_metric.compute(
                 predictions=pred_strs,
                 references=label_strs   # wrapper handles dict-conversion
             )["cider"]
+    out["cider"] = round(float(cider), 4)
 
     # ---- NIST (may not exist on tiny samples) ------------------------
-    nist_raw = nist_metric.compute(
-                predictions=pred_strs,
-                references=[[r] for r in label_strs]
-              )
-    nist_val = nist_raw.get("nist_mt")
-
-    # helper to round only numerics
-    def _r(x):
-        return round(float(x), 4) if isinstance(x, (int, float)) else x
-
-    out = {
-        "bleu"  : _r(bleu),
-        "meteor": _r(meteor),
-        "rougeL": _r(rougeL),
-        "cider"  : _r(cider),
-    }
-    if nist_val is not None:
-        out["nist"] = _r(nist_val)
+    if nist_metric is not None:
+        nist_raw = nist_metric.compute(
+                    predictions=pred_strs,
+                    references=[[r] for r in label_strs]
+                  )
+        nist_val = nist_raw.get("nist_mt")
+        if nist_val is not None:
+            out["nist"] = round(float(nist_val), 4)
 
     return out
 
-print("script started \n", flush=True)
-orthoLoRAConfig = UIOrthoLoRAConfig(
-    target_modules=["attn.c_attn", "attn.c_proj"],
+
+def get_tokenizer_and_model(model_path, device):
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    peft_config = PeftConfig.from_pretrained(model_path)
+    base_model = AutoModelForCausalLM.from_pretrained(model_path)
+    base_model.config.pad_token_id = tokenizer.pad_token_id
+    base_model = base_model.to(device)
+    model = PeftModel.from_pretrained(base_model, model_path)
+    model = model.to(device)
+    set_contiguous(model)
+    return tokenizer, model, peft_config
+
+def get_tokenizer(model_type):
+    tokenizer = AutoTokenizer.from_pretrained(model_type)
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    return tokenizer
+
+
+def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, model_path="outputs/models", model_type="gpt2-medium"):
+    print("finetuning model \n", flush=True)
+    orthoLoRAConfig = UIOrthoLoRAConfig(
+    target_modules=orthoLoRA_args.target_modules,
     fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
-    initial_scaler         = 0.1,    # scale of the diagonal Σ at init
-    initial_sigma          = 0.1,    # std-dev for the trainable Σ entries
-    uiortholora_alpha      = 1,
-    uiortholora_dropout    = 0,
-    num_svalues_to_adapt   = 10,       
-    num_svectors_to_adapt  = 10,       
-    task_type              = TaskType.CAUSAL_LM
-)
+    initial_scaler         = orthoLoRA_args.initial_scaler,    # scale of the diagonal Σ at init
+    initial_sigma          = orthoLoRA_args.initial_sigma,    # std-dev for the trainable Σ entries
+    uiortholora_alpha      = orthoLoRA_args.uiortholora_alpha,
+    uiortholora_dropout    = orthoLoRA_args.uiortholora_dropout,
+    num_svalues_to_adapt   = orthoLoRA_args.num_svalues_to_adapt,       
+    num_svectors_to_adapt  = orthoLoRA_args.num_svectors_to_adapt,       
+    task_type              = TaskType.CAUSAL_LM)
 
-print("loading model \n", flush=True)
-model_path = "gpt2-medium"
-seed=42
+    base_model = AutoModelForCausalLM.from_pretrained(model_type)
+    base_model.config.pad_token_id = tokenizer.pad_token_id
+    base_model = base_model.to(device)
+    print("base model loaded \n", flush=True)
 
-torch.manual_seed(seed)
-np.random.seed(seed)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    orthoLora_model = get_peft_model(base_model, orthoLoRAConfig)
+    set_contiguous(orthoLora_model)
+    orthoLora_model = orthoLora_model.to(device)
+    orthoLora_model.print_trainable_parameters()
+    print("orthoLora model loaded \n", flush=True)
+    
+    trainer = Trainer(
+        model=orthoLora_model,
+        args=training_args,
+        train_dataset=ds["train"].select(range(100)),
+        eval_dataset=ds["validation"])
 
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-tokenizer.padding_side = "left"
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+    trainer.train()
+    trainer.save_model(model_path)
+    print("model saved to ", model_path, flush=True)
 
-ds = load_and_prepare(tokenizer)
-# base_model = AutoModelForCausalLM.from_pretrained(model_path)
-# base_model = base_model.to(device)
-# base_model.config.pad_token_id = tokenizer.pad_token_id
-
-# model = get_peft_model(base_model, orthoLoRAConfig)
-# print("model loaded \n", flush=True)
-# set_contiguous(model)
-# model.print_trainable_parameters()
-# model = get_peft_model(base_model, orthoLoRAConfig)
-
-# set_contiguous(model)
-# model.print_trainable_parameters()
-
-data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-
-training_args = TrainingArguments(
-    output_dir="outputs/check",
-    overwrite_output_dir=True,
-    eval_strategy="no",
-    save_strategy="no",
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=64,
-    eval_accumulation_steps=2,
-    learning_rate=1e-3,
-    lr_scheduler_type="linear",
-    label_smoothing_factor=0.1,
-    num_train_epochs=5,
-    weight_decay=0.01,
-    warmup_steps=500,
-    logging_steps=50,
-    save_total_limit=1,
-    report_to="none",
-)
-training_args = TrainingArguments(
-    output_dir="outputs/check",
-    overwrite_output_dir=True,
-    eval_strategy="no",
-    save_strategy="no",
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=64,
-    eval_accumulation_steps=2,
-    learning_rate=1e-3,
-    lr_scheduler_type="linear",
-    label_smoothing_factor=0.1,
-    num_train_epochs=5,
-    weight_decay=0.01,
-    warmup_steps=500,
-    logging_steps=50,
-    save_total_limit=1,
-    report_to="none",
-)
-
-# trainer = Trainer(
-#         model=model,
-#         args=training_args,
-#         train_dataset=ds["train"].select(range(100)),
-#         eval_dataset=ds["validation"],
-#         data_collator=data_collator,
-#         compute_metrics=compute_metrics,
-#     )
-
-# # trainer.train()
-# from accelerate import Accelerator
-# accelerator = Accelerator()
-# trainer = accelerator.prepare(trainer)
-# trainer.train()
+    return trainer.model
 
 
-# trainer.save_model("outputs/models")
+def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args):
+    model.eval()
 
-# Load the trained model from saved checkpoint
-# Load config to get base model info
-peft_config = PeftConfig.from_pretrained("outputs/models")
+    gen_preds = []
+    true_labels = []
 
-# Load base model (e.g., GPT2-medium)
-base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path)
-base_model = base_model.to(device)
+    dataloader = DataLoader(ds["test"].select(range(100)), batch_size=32, collate_fn=data_collator)
 
-# Load the full adapted model (base + adapter weights)
-model = PeftModel.from_pretrained(base_model, "outputs/models")
-model = model.to(device)
+    for batch in tqdm(dataloader, desc="Generating outputs"):
+        input_ids = batch["input_ids"].cuda()
+        attention_mask = (input_ids != tokenizer.pad_token_id).long().cuda()
+        labels = batch["labels"]
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=64,
+                num_beams=4,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        gen_preds.append(outputs.cpu())
+        true_labels.append(labels)
 
-# trainer.model = model
+    # Stack tensors
+    gen_preds = torch.cat(gen_preds, dim=0)
+    true_labels = torch.cat(true_labels, dim=0)
+
+    # Compute and save metrics
+    metrics = compute_metrics((gen_preds, true_labels), tokenizer)
+
+    # Add timestamp and training details
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    metrics.update({
+        "timestamp": timestamp,
+        "base_model": peft_config.base_model_name_or_path,
+        "num_training_examples": len(ds["train"]),
+        "num_test_examples": len(ds["test"]),
+        "num_training_epochs": training_args.num_train_epochs,
+        "learning_rate": training_args.learning_rate,
+        "batch_size": training_args.per_device_train_batch_size,
+        "num_beams": 4,
+        "max_new_tokens": 64,
+        "num_svalues_to_adapt": peft_config.num_svalues_to_adapt,
+        "num_svectors_to_adapt": peft_config.num_svectors_to_adapt,
+        "uiortholora_alpha": peft_config.uiortholora_alpha,
+        "uiortholora_dropout": peft_config.uiortholora_dropout,
+        "initial_scaler": peft_config.initial_scaler,
+        "initial_sigma": peft_config.initial_sigma,
+        "target_modules": list(peft_config.target_modules) if peft_config.target_modules is not None else None,  # Convert to list if it's a set
+    })
+
+    Path(training_args.output_dir).mkdir(parents=True, exist_ok=True)
+    metrics_file = Path(training_args.output_dir) / "test_metrics.json"
+
+    # Load existing metrics if file exists
+    existing_metrics = []
+    if metrics_file.exists():
+        with open(metrics_file) as f:
+            existing_metrics = json.load(f)
+            if not isinstance(existing_metrics, list):
+                existing_metrics = [existing_metrics]
+
+    # Append new metrics
+    existing_metrics.append(metrics)
+
+    # Helper function to convert sets to lists for JSON serialization
+    def convert_sets_to_lists(obj):
+        if isinstance(obj, set):
+            return list(obj)
+        elif isinstance(obj, dict):
+            return {k: convert_sets_to_lists(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_sets_to_lists(item) for item in obj]
+        else:
+            return obj
+
+    # Convert any sets to lists before JSON serialization
+    existing_metrics = convert_sets_to_lists(existing_metrics)
+
+    # Write updated metrics
+    metrics_file.write_text(json.dumps(existing_metrics, indent=2))
+    print(f"Test metrics saved to {training_args.output_dir} at {timestamp}")
+
+    for k, v in metrics.items():
+        if isinstance(v, (int, float)):
+            print(f"{k}: {v:.4f}")
+        else:
+            print(f"{k}: {v}")
 
 
-# raw = trainer.predict(ds["test"])
+def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", training_args=None, finetune=False, peft_config=None):
+    print("training and evaluating \n", flush=True)
 
-model.eval()
-model.cuda()  # move to GPU if not already
-tokenizer.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+    # set seed and device
+    seed=42
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("device: ", device, flush=True)   
 
-gen_preds = []
-true_labels = []
+    tokenizer = get_tokenizer(model_type)
+    print("tokenizer loaded \n", flush=True)
 
-dataloader = DataLoader(ds["test"].select(range(100)), batch_size=32, collate_fn=data_collator)
+    # load dataset
+    ds = load_and_prepare(tokenizer)
+    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    print("dataset loaded \n", flush=True)
 
-for batch in tqdm(dataloader, desc="Generating outputs"):
-    input_ids = batch["input_ids"].cuda()
-    attention_mask = (input_ids != tokenizer.pad_token_id).long().cuda()
-    labels = batch["labels"]
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=64,
-            num_beams=4,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    gen_preds.append(outputs.cpu())
-    true_labels.append(labels)
+    if finetune:
+        model = finetune_model(tokenizer, training_args, peft_config, ds, device, model_path, model_type)
 
-# Stack tensors
-gen_preds = torch.cat(gen_preds, dim=0)
-true_labels = torch.cat(true_labels, dim=0)
-
-# Compute and save metrics
-metrics = compute_metrics((gen_preds, true_labels))
-
-# Add timestamp and training details
-timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-metrics.update({
-    "timestamp": timestamp,
-    "base_model": peft_config.base_model_name_or_path,
-    "num_training_examples": len(ds["train"]),
-    "num_test_examples": len(ds["test"]),
-    "num_training_epochs": training_args.num_train_epochs,
-    "learning_rate": training_args.learning_rate,
-    "batch_size": training_args.per_device_train_batch_size,
-    "num_beams": 4,
-    "max_new_tokens": 64,
-    "num_svalues_to_adapt": orthoLoRAConfig.num_svalues_to_adapt,
-    "num_svectors_to_adapt": orthoLoRAConfig.num_svectors_to_adapt,
-    "uiortholora_alpha": orthoLoRAConfig.uiortholora_alpha,
-    "uiortholora_dropout": orthoLoRAConfig.uiortholora_dropout,
-    "initial_scaler": orthoLoRAConfig.initial_scaler,
-    "initial_sigma": orthoLoRAConfig.initial_sigma,
-    "target_modules": list(orthoLoRAConfig.target_modules) if orthoLoRAConfig.target_modules is not None else None,  # Convert to list if it's a set
-})
-
-Path(training_args.output_dir).mkdir(parents=True, exist_ok=True)
-metrics_file = Path(training_args.output_dir) / "test_metrics.json"
-
-# Load existing metrics if file exists
-existing_metrics = []
-if metrics_file.exists():
-    with open(metrics_file) as f:
-        existing_metrics = json.load(f)
-        if not isinstance(existing_metrics, list):
-            existing_metrics = [existing_metrics]
-
-# Append new metrics
-existing_metrics.append(metrics)
-
-# Helper function to convert sets to lists for JSON serialization
-def convert_sets_to_lists(obj):
-    if isinstance(obj, set):
-        return list(obj)
-    elif isinstance(obj, dict):
-        return {k: convert_sets_to_lists(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_sets_to_lists(item) for item in obj]
     else:
-        return obj
+        tokenizer, model, peft_config = get_tokenizer_and_model(model_path, device)
+        print("Loaded already finetuned model \n", flush=True)
 
-# Convert any sets to lists before JSON serialization
-existing_metrics = convert_sets_to_lists(existing_metrics)
-
-# Write updated metrics
-metrics_file.write_text(json.dumps(existing_metrics, indent=2))
-print(f"Test metrics saved to {training_args.output_dir} at {timestamp}")
-
-for k, v in metrics.items():
-    if isinstance(v, (int, float)):
-        print(f"{k}: {v:.4f}")
-    else:
-        print(f"{k}: {v}")
-
-
+    # evaluate model
+    evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_args)
