@@ -141,20 +141,33 @@ def compute_metrics(eval_pred, tokenizer):
     return out
 
 
-def get_tokenizer_and_model(model_path, device):
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.padding_side = "left"
+def get_tokenizer_and_model(model_path: str, device):
+    """
+    Load a base model and inject a saved PEFT adapter from `model_path`.
+    """
+    # 1) Load the adapter config to get the original base model
+    peft_config = PeftConfig.from_pretrained(model_path)
+    base_model_name = peft_config.base_model_name_or_path
+
+    # 2) Load base model and tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    peft_config = PeftConfig.from_pretrained(model_path)
-    base_model = AutoModelForCausalLM.from_pretrained(model_path)
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
     base_model.config.pad_token_id = tokenizer.pad_token_id
     base_model = base_model.to(device)
+
+    # 3) Load the adapter into the base model
     model = PeftModel.from_pretrained(base_model, model_path)
     model = model.to(device)
+
+    # 4) Ensure contiguous weights (optional)
     set_contiguous(model)
+
     return tokenizer, model, peft_config
+
+
 
 def get_tokenizer(model_type):
     tokenizer = AutoTokenizer.from_pretrained(model_type)
