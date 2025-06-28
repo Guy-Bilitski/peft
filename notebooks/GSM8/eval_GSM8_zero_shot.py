@@ -1,6 +1,7 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import torch
 import re
-import os
 import argparse
 import random
 from tqdm import tqdm
