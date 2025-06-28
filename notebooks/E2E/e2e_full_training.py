@@ -221,7 +221,7 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
     gen_preds = []
     true_labels = []
 
-    dataloader = DataLoader(ds["test"], batch_size=8, collate_fn=data_collator)
+    dataloader = DataLoader(ds["test"], batch_size=16, collate_fn=data_collator)
 
     for batch in tqdm(dataloader, desc="Generating outputs"):
         input_ids = batch["input_ids"].cuda()
