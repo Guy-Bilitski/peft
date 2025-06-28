@@ -15,7 +15,7 @@ from e2e_full_training import (
 
 # ─────────────────────────── USER‑EDITABLE SECTION ─────────────────────────────
 MODEL_PATH = "outputs/models"   # directory to save / load the PEFT model
-FINETUNE   = True               # True → run fine‑tuning before evaluation
+FINETUNE   = False               # True → run fine‑tuning before evaluation
 MODEL_TYPE = "gpt2-medium"     # model type to use
 
 LORA_CFG = UIOrthoLoRAConfig(
