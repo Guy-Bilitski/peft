@@ -1,25 +1,24 @@
 # training_manager.py  – hyper-parameter search over learning-rate
 from pathlib import Path
 from transformers.training_args import TrainingArguments
-from e2e_full_training import train_and_evaluate
+from E2e_training2 import train_and_evaluate
 from peft import UIOrthoLoRAConfig
 
 # ───────────────────────── settings every run shares ───────────────────────── #
 MODEL_TYPE = "gpt2-medium"
-FINETUNE   = True   # change to False if you only want to evaluate
+FINETUNE   = False   # change to False if you only want to evaluate
 
 LORA_CFG = UIOrthoLoRAConfig(
     target_modules = [
         "attn.c_attn", "attn.c_proj",
-        "mlp.c_fc",    "mlp.c_proj",
     ],
     fan_in_fan_out=True,
     initial_scaler=0.1,
     initial_sigma=0.1,
     uiortholora_alpha=1,
-    uiortholora_dropout=0.0,
-    num_svalues_to_adapt=96,
-    num_svectors_to_adapt=30,
+    uiortholora_dropout=0.1,
+    num_svalues_to_adapt=128,
+    num_svectors_to_adapt=45,
 )
 
 BASE_TRAIN_ARGS = dict(

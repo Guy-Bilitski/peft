@@ -16,7 +16,7 @@ from pycocoevalcap.cider.cider import Cider
 from torch.utils.data import DataLoader
 import datetime
 
-def load_and_prepare(tokenizer, max_length=128):
+def load_and_prepare(tokenizer, max_length=512):
     """Load E2E dataset and prepare tokenised fields."""
     ds = load_dataset("tuetschek/e2e_nlg", trust_remote_code=True)
 
@@ -50,8 +50,8 @@ class CiderMetric:
 
     def compute(self, *, predictions, references):
         # pycocoevalcap expects dicts: {idx: ["sentence"]}
-        hyps = {i: [pred] for i, pred in enumerate(predictions)}
-        refs = {i: [ref]  for i, ref  in enumerate(references)}
+        hyps = {i: [str(pred)] for i, pred in enumerate(predictions)}
+        refs = {i: [str(ref)]  for i, ref  in enumerate(references)}
         score, _ = self.scorer.compute_score(refs, hyps)
         return {"cider": score}
 

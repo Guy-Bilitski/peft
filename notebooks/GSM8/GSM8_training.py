@@ -132,7 +132,7 @@ def build_model(args: ScriptArgs, tok):
     Load the base model and attach (or reload) a UIOrthoLoRA adapter.
     """
     # 1️⃣  Base model ----------------------------------------------------------
-    compute_dtype = torch.bfloat16 if getattr(args, "bf16", False) else torch.float32
+    compute_dtype = torch.float32
     base = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         torch_dtype=compute_dtype,
