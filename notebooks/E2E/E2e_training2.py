@@ -24,40 +24,33 @@ def load_and_prepare(tokenizer):
         prompt    = f"{rec['meaning_representation']} => "
         reference = rec.get("human_reference") or rec.get("reference", "")
 
-        text       = prompt + reference
-        tok        = tokenizer(text, truncation=True, padding="max_length", max_length=512)
+        # 1️⃣  tokenize prompt **alone** (no padding, no special tokens)
+        prompt_ids = tokenizer(prompt,
+                            add_special_tokens=False,
+                            padding=False,
+                            truncation=False)["input_ids"]
 
+        # 2️⃣  tokenize prompt + reference with left-padding to 512
+        text       = prompt + reference
+        tok        = tokenizer(text,
+                            truncation=True,
+                            padding="max_length",
+                            max_length=512)
 
         labels = tok["input_ids"].copy()
-        prompt_len = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
-        labels[:prompt_len] = [-100] * prompt_len
+        labels[:len(prompt_ids)] = [-100] * len(prompt_ids)   # mask prompt
 
-        tok["labels"]      = labels
-        tok["prompt_ids"]  = tok["input_ids"][:prompt_len]   # keep for eval
+        tok["labels"]     = labels
+        tok["prompt_ids"] = prompt_ids                        # ✅ real prompt
         return tok
-
-
 
     return ds.map(to_features, remove_columns=ds["train"].column_names)
 
 
-
-class CiderMetric:
-    """Wraps pycocoevalcap so it looks like an `evaluate` metric."""
-    def __init__(self):
-        self.scorer = Cider()
-
-    def compute(self, *, predictions, references):
-        # pycocoevalcap expects dicts: {idx: ["sentence"]}
-        hyps = {i: [str(pred)] for i, pred in enumerate(predictions)}
-        refs = {i: [str(ref)]  for i, ref  in enumerate(references)}
-        score, _ = self.scorer.compute_score(refs, hyps)
-        return {"cider": score}
-
-def postprocess_text(preds, labels):
-    preds = [p.strip() for p in preds]
-    labels = [l.strip() for l in labels]
-    return preds, labels
+def set_tokenizer(tokenizer):
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
 def set_contiguous(model):
     for m in model.modules():
@@ -77,12 +70,11 @@ def get_tokenizer_and_model(model_path: str, device):
 
     # 2) Load base model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=False)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    set_tokenizer(tokenizer)
 
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
     base_model.config.pad_token_id = tokenizer.pad_token_id
+    base_model.generation_config.pad_token_id = tokenizer.pad_token_id
     base_model = base_model.to(device)
 
     # 3) Load the adapter into the base model
@@ -98,9 +90,7 @@ def get_tokenizer_and_model(model_path: str, device):
 
 def get_tokenizer(model_type):
     tokenizer = AutoTokenizer.from_pretrained(model_type, use_fast=False)
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    set_tokenizer(tokenizer)
 
     return tokenizer
 
@@ -132,7 +122,7 @@ def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_col
     trainer = Trainer(
         model=orthoLora_model,
         args=training_args,
-        train_dataset=ds["train"].select(range(100)), # TODO: remove the select 
+        train_dataset=ds["train"].select(range(1000)), # TODO: remove the select 
         eval_dataset=ds["validation"].select(range(100)),
         data_collator=data_collator
         )
@@ -163,17 +153,24 @@ def evaluate_model(
     out_path = out_dir / "system_outputs.txt"
 
     gen_texts = []
-    tokenizer.padding_side = "left"
-    # eval_collator = DataCollatorWithPadding(tokenizer, padding=True)
 
     def collate_fn(batch):
-        input_features = [{"input_ids": b["prompt_ids"]} for b in batch]
-        
-        return tokenizer.pad(
-            input_features,
-            padding="longest",
-            return_tensors="pt"
-        )
+        feats = [{"input_ids": b["prompt_ids"]} for b in batch]
+        out = tokenizer.pad(
+        feats,
+        padding="longest",
+        return_attention_mask=True,
+        return_tensors="pt"
+    )
+
+
+        for idx, example in enumerate(batch):
+            print("\n🔹 Original prompt:", tokenizer.decode(example["prompt_ids"],
+                                                        skip_special_tokens=False))
+            padded_ids = out["input_ids"][idx].tolist()
+            print("🔹 Padded tokens:  ", tokenizer.convert_ids_to_tokens(padded_ids))
+
+        return out        
 
     dataloader = DataLoader(
         ds["test"].select(range(100)),        # TODO: remove the select
@@ -233,7 +230,7 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", tr
     print("dataset loaded \n", flush=True)
 
     if finetune:
-        data_collator = DataCollatorWithPadding(tokenizer, padding=True, padding_side="left")
+        data_collator = DataCollatorWithPadding(tokenizer, padding=True)
         model = finetune_model(tokenizer, training_args, peft_config, ds, device, data_collator, model_path, model_type)
 
     else:

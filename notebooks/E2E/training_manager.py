@@ -6,7 +6,7 @@ from peft import UIOrthoLoRAConfig
 
 # ───────────────────────── settings every run shares ───────────────────────── #
 MODEL_TYPE = "gpt2-medium"
-FINETUNE   = False   # change to False if you only want to evaluate
+FINETUNE   = True   # change to False if you only want to evaluate
 
 LORA_CFG = UIOrthoLoRAConfig(
     target_modules = [
