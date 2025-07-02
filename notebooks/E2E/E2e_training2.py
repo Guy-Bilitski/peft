@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import torch
 from tqdm import tqdm
@@ -38,7 +38,8 @@ def load_and_prepare(tokenizer):
                             max_length=512)
 
         labels = tok["input_ids"].copy()
-        labels[:len(prompt_ids)] = [-100] * len(prompt_ids)   # mask prompt
+        labels[:len(prompt_ids)] = [-100] * len(prompt_ids)  # mask prompt
+        labels = [l if l != tokenizer.pad_token_id else -100 for l in labels]  # mask padding
 
         tok["labels"]     = labels
         tok["prompt_ids"] = prompt_ids                        # ✅ real prompt
@@ -48,7 +49,7 @@ def load_and_prepare(tokenizer):
 
 
 def set_tokenizer(tokenizer):
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -69,7 +70,7 @@ def get_tokenizer_and_model(model_path: str, device):
     base_model_name = peft_config.base_model_name_or_path
 
     # 2) Load base model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     set_tokenizer(tokenizer)
 
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
@@ -89,9 +90,8 @@ def get_tokenizer_and_model(model_path: str, device):
 
 
 def get_tokenizer(model_type):
-    tokenizer = AutoTokenizer.from_pretrained(model_type, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(model_type)
     set_tokenizer(tokenizer)
-
     return tokenizer
 
 
@@ -122,8 +122,8 @@ def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_col
     trainer = Trainer(
         model=orthoLora_model,
         args=training_args,
-        train_dataset=ds["train"].select(range(1000)), # TODO: remove the select 
-        eval_dataset=ds["validation"].select(range(100)),
+        train_dataset=ds["train"],
+        eval_dataset=ds["validation"],
         data_collator=data_collator
         )
 
@@ -134,7 +134,7 @@ def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_col
     return trainer.model
 
 
-def evaluate_model(
+def run_inference(
     model,
     tokenizer,
     ds,
@@ -163,18 +163,11 @@ def evaluate_model(
         return_tensors="pt"
     )
 
-
-        for idx, example in enumerate(batch):
-            print("\n🔹 Original prompt:", tokenizer.decode(example["prompt_ids"],
-                                                        skip_special_tokens=False))
-            padded_ids = out["input_ids"][idx].tolist()
-            print("🔹 Padded tokens:  ", tokenizer.convert_ids_to_tokens(padded_ids))
-
         return out        
 
     dataloader = DataLoader(
-        ds["test"].select(range(100)),        # TODO: remove the select
-        batch_size=32,
+        ds["test"],
+        batch_size=16,
         collate_fn=collate_fn,
     )
 
@@ -235,8 +228,8 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", tr
 
     else:
         tokenizer, model, peft_config = get_tokenizer_and_model(model_path, device)
-        tokenizer.padding_side = "left"
+        set_tokenizer(tokenizer)
         print("Loaded already finetuned model \n", flush=True)
 
-    # evaluate model
-    evaluate_model(model, tokenizer, ds, inference_args, out_dir=training_args.output_dir)
+    # run inference and save results
+    run_inference(model, tokenizer, ds, inference_args, out_dir=training_args.output_dir)

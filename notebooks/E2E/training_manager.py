@@ -16,7 +16,7 @@ LORA_CFG = UIOrthoLoRAConfig(
     initial_scaler=0.1,
     initial_sigma=0.1,
     uiortholora_alpha=1,
-    uiortholora_dropout=0.1,
+    uiortholora_dropout=0,
     num_svalues_to_adapt=128,
     num_svectors_to_adapt=45,
 )
@@ -26,7 +26,7 @@ BASE_TRAIN_ARGS = dict(
     eval_strategy="no",
     save_strategy="no",
     per_device_train_batch_size=8,
-    per_device_eval_batch_size=64,
+    per_device_eval_batch_size=16,
     eval_accumulation_steps=2,
     lr_scheduler_type="linear",
     label_smoothing_factor=0.1,
@@ -46,7 +46,8 @@ INFERENCE_ARGS = {
 }
 
 # ───────────── grid of learning-rates to try ───────────── #
-SEARCH_LRS = [5e-4, 2e-3, 5e-3, 1e-2, 4e-2]
+# SEARCH_LRS = [2e-2, 4e-2]
+SEARCH_LRS = [2e-2]
 
 # ───────────────────────── main loop ───────────────────── #
 def main() -> None:

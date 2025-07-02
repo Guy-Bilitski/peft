@@ -221,7 +221,7 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
     gen_preds = []
     true_labels = []
 
-    dataloader = DataLoader(ds["test"], batch_size=16, collate_fn=data_collator)
+    dataloader = DataLoader(ds["test"], batch_size=4, collate_fn=data_collator)
 
     for batch in tqdm(dataloader, desc="Generating outputs"):
         input_ids = batch["input_ids"].cuda()
@@ -239,6 +239,8 @@ def evaluate_model(model, tokenizer, ds, data_collator, peft_config, training_ar
                 eos_token_id=tokenizer.eos_token_id,
             )
         gen_preds.append(outputs.cpu())
+        del input_ids, attention_mask, outputs
+        torch.cuda.empty_cache()
         true_labels.append(labels)
 
     # Stack tensors
