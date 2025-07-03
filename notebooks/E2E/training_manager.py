@@ -43,19 +43,20 @@ INFERENCE_ARGS = {
     "no_repeat_ngram_size": 4,
     "length_penalty": 0.9,
     "max_new_tokens": 64,
+    "inference_batch_size": 16,
 }
 
 # ───────────── grid of learning-rates to try ───────────── #
 # SEARCH_LRS = [2e-2, 4e-2]
-SEARCH_LRS = [2e-2]
+SEARCH_LRS = [2e-4]
 
 # ───────────────────────── main loop ───────────────────── #
 def main() -> None:
     for lr in SEARCH_LRS:
         # unique sub-folders per LR
         run_tag      = f"lr_{lr:g}"
-        model_path   = f"outputs/models/{run_tag}"
-        results_path = f"outputs/results/{run_tag}"
+        model_path   = f"outputs/lora_models/{run_tag}"
+        results_path = f"outputs/lora_results/{run_tag}"
 
         Path(model_path).mkdir(parents=True, exist_ok=True)
         Path(results_path).mkdir(parents=True, exist_ok=True)
@@ -79,6 +80,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     # ensure the root folders exist
-    Path("outputs/models").mkdir(parents=True, exist_ok=True)
-    Path("outputs/results").mkdir(parents=True, exist_ok=True)
+    Path("outputs/lora_models").mkdir(parents=True, exist_ok=True)
+    Path("outputs/lora_results").mkdir(parents=True, exist_ok=True)
     main()

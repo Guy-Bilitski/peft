@@ -5,7 +5,7 @@ import torch
 from tqdm import tqdm
 import evaluate
 import numpy as np
-from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel
+from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel, LoraConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.trainer import Trainer
 from transformers.data.data_collator import DataCollatorWithPadding
@@ -97,23 +97,36 @@ def get_tokenizer(model_type):
 
 def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_collator, model_path="outputs/models", model_type="gpt2-medium"):
     print("finetuning model \n", flush=True)
-    orthoLoRAConfig = UIOrthoLoRAConfig(
-    target_modules=orthoLoRA_args.target_modules,
-    fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
-    initial_scaler         = orthoLoRA_args.initial_scaler,    # scale of the diagonal Σ at init
-    initial_sigma          = orthoLoRA_args.initial_sigma,    # std-dev for the trainable Σ entries
-    uiortholora_alpha      = orthoLoRA_args.uiortholora_alpha,
-    uiortholora_dropout    = orthoLoRA_args.uiortholora_dropout,
-    num_svalues_to_adapt   = orthoLoRA_args.num_svalues_to_adapt,       
-    num_svectors_to_adapt  = orthoLoRA_args.num_svectors_to_adapt,       
-    task_type              = TaskType.CAUSAL_LM)
+    # orthoLoRAConfig = UIOrthoLoRAConfig(
+    # target_modules=orthoLoRA_args.target_modules,
+    # fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
+    # initial_scaler         = orthoLoRA_args.initial_scaler,    # scale of the diagonal Σ at init
+    # initial_sigma          = orthoLoRA_args.initial_sigma,    # std-dev for the trainable Σ entries
+    # uiortholora_alpha      = orthoLoRA_args.uiortholora_alpha,
+    # uiortholora_dropout    = orthoLoRA_args.uiortholora_dropout,
+    # num_svalues_to_adapt   = orthoLoRA_args.num_svalues_to_adapt,       
+    # num_svectors_to_adapt  = orthoLoRA_args.num_svectors_to_adapt,       
+    # task_type              = TaskType.CAUSAL_LM)
+
+    lora_cfg = LoraConfig(
+    r=8,                        # rank
+    lora_alpha=32,              # α so that α / r = 4
+    lora_dropout=0.05,          # small regulariser
+    bias="none",
+    task_type=TaskType.CAUSAL_LM,
+    fan_in_fan_out=True,        # GPT-2 matrices are (out, in)
+    target_modules=[            # touch Wq & Wv only
+        "attn.c_attn",          # covers q,k,v in one tensor
+    ],
+)
 
     base_model = AutoModelForCausalLM.from_pretrained(model_type)
     base_model.config.pad_token_id = tokenizer.pad_token_id
     base_model = base_model.to(device)
     print("base model loaded \n", flush=True)
 
-    orthoLora_model = get_peft_model(base_model, orthoLoRAConfig)
+    # orthoLora_model = get_peft_model(base_model, orthoLoRAConfig)
+    orthoLora_model = get_peft_model(base_model, lora_cfg)
     set_contiguous(orthoLora_model)
     orthoLora_model = orthoLora_model.to(device)
     orthoLora_model.print_trainable_parameters()
@@ -153,6 +166,7 @@ def run_inference(
     out_path = out_dir / "system_outputs.txt"
 
     gen_texts = []
+    tokenizer.padding_side = "left"
 
     def collate_fn(batch):
         feats = [{"input_ids": b["prompt_ids"]} for b in batch]
@@ -167,7 +181,7 @@ def run_inference(
 
     dataloader = DataLoader(
         ds["test"],
-        batch_size=16,
+        batch_size=inference_args["inference_batch_size"],
         collate_fn=collate_fn,
     )
 
