@@ -4,13 +4,13 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Sequence, List
 import logging
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 import torch
 import torch.distributed
 import transformers
 from transformers import Trainer, BitsAndBytesConfig
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, concatenate_datasets, load_from_disk
 import datasets
 import numpy as np
 from peft import UIOrthoLoRAConfig, LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training, PeftModel, LoraRuntimeConfig
@@ -183,8 +183,11 @@ def build_model(script_args, checkpoint_dir):
                     "k_proj",     # key projection
                     "v_proj",     # value projection
                     "o_proj",     # output projection (after attention)
+                    # "gate_proj",  # gate projection
+                    # "down_proj",  # down projection
+                    # "up_proj",    # up projection
                 ],
-                fan_in_fan_out=True,
+                fan_in_fan_out=False,
                 initial_scaler=0.1,
                 initial_sigma=0.1,
                 uiortholora_alpha=1,
@@ -192,6 +195,17 @@ def build_model(script_args, checkpoint_dir):
                 num_svalues_to_adapt=128,
                 num_svectors_to_adapt=45,
             )
+            # peft_config = LoraConfig(
+            #     use_dora=False,
+            #     runtime_config=LoraRuntimeConfig(ephemeral_gpu_offload=False),
+            #     task_type=TaskType.CAUSAL_LM,
+            #     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            #     inference_mode=False,
+            #     r=2, 
+            #     lora_alpha=32,
+            #     lora_dropout=0,
+            #     init_lora_weights=True,
+            # )
             model = get_peft_model(model, peft_config)
 
     for name, module in model.named_modules():
@@ -237,7 +251,12 @@ def train():
         else:
             cur_task, cur_split = task, script_args.dataset_split
 
-        ds = load_dataset(script_args.data_path, data_dir=cur_task, split=cur_split)
+        # ds = load_dataset(script_args.data_path, data_dir=cur_task, split=cur_split)
+        disk_path = os.path.join(script_args.data_path, cur_task)
+        ds = load_from_disk(disk_path)
+        if ":" in task:
+            ds = ds.select(range(int(num_split)))
+
         if script_args.local_rank == 0:
             print(f"{script_args.data_path}/{cur_task}/{cur_split}/{ds.num_rows}")
             for k,v in ds[0].items():
