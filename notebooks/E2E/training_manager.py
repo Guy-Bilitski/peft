@@ -7,6 +7,8 @@ from peft import UIOrthoLoRAConfig
 # ───────────────────────── settings every run shares ───────────────────────── #
 MODEL_TYPE = "gpt2-medium"
 FINETUNE   = True   # change to False if you only want to evaluate
+INFERENCE = True
+EVALUATE = True
 
 LORA_CFG = UIOrthoLoRAConfig(
     target_modules = [
@@ -47,16 +49,15 @@ INFERENCE_ARGS = {
 }
 
 # ───────────── grid of learning-rates to try ───────────── #
-# SEARCH_LRS = [2e-2, 4e-2]
-SEARCH_LRS = [2e-4]
+SEARCH_LRS = [2e-4, 5e-4, 1e-3, 2e-3]
 
 # ───────────────────────── main loop ───────────────────── #
 def main() -> None:
     for lr in SEARCH_LRS:
         # unique sub-folders per LR
         run_tag      = f"lr_{lr:g}"
-        model_path   = f"outputs/lora_models/{run_tag}"
-        results_path = f"outputs/lora_results/{run_tag}"
+        model_path   = f"outputs/models/{run_tag}"
+        results_path = f"outputs/results/{run_tag}"
 
         Path(model_path).mkdir(parents=True, exist_ok=True)
         Path(results_path).mkdir(parents=True, exist_ok=True)
@@ -75,11 +76,14 @@ def main() -> None:
             finetune=FINETUNE,
             peft_config=LORA_CFG,
             inference_args=INFERENCE_ARGS,
+            run_tag=run_tag,
+            inference=INFERENCE,
+            evaluate=EVALUATE,
         )
         print(f"✅ Finished run {run_tag}")
 
 if __name__ == "__main__":
     # ensure the root folders exist
-    Path("outputs/lora_models").mkdir(parents=True, exist_ok=True)
-    Path("outputs/lora_results").mkdir(parents=True, exist_ok=True)
+    Path("outputs/models").mkdir(parents=True, exist_ok=True)
+    Path("outputs/results").mkdir(parents=True, exist_ok=True)
     main()

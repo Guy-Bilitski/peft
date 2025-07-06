@@ -1,9 +1,9 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import torch
+import subprocess
 from tqdm import tqdm
-import evaluate
 import numpy as np
 from peft import UIOrthoLoRAConfig, get_peft_model, TaskType, PeftConfig, PeftModel, LoraConfig
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -11,11 +11,10 @@ from transformers.trainer import Trainer
 from transformers.data.data_collator import DataCollatorWithPadding
 from datasets import load_dataset
 from pathlib import Path
-import json
-from pycocoevalcap.cider.cider import Cider
 from torch.utils.data import DataLoader
-import datetime
-from transformers.data.data_collator import default_data_collator
+
+OUTPUT_DIR = "outputs/results"
+SYSTEM_OUTPUTS_PATH = "system_outputs"
 
 def load_and_prepare(tokenizer):
     ds = load_dataset("tuetschek/e2e_nlg", trust_remote_code=True)
@@ -30,8 +29,7 @@ def load_and_prepare(tokenizer):
                             padding=False,
                             truncation=False)["input_ids"]
 
-        # 2️⃣  tokenize prompt + reference with left-padding to 512
-        text       = prompt + reference
+        text       = prompt + reference + tokenizer.eos_token
         tok        = tokenizer(text,
                             truncation=True,
                             padding="max_length",
@@ -48,10 +46,62 @@ def load_and_prepare(tokenizer):
     return ds.map(to_features, remove_columns=ds["train"].column_names)
 
 
-def set_tokenizer(tokenizer):
-    tokenizer.padding_side = "right"
+def run_evaluation(run_tag):
+    result = subprocess.run(
+        [
+            "python", "e2e-metrics/measure_scores.py",
+            "--python",
+            f"{OUTPUT_DIR}/testset.txt",
+            f"{OUTPUT_DIR}/{run_tag}/system_outputs_uniq.txt"
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        print("❌ Evaluation failed!")
+        print("stderr:")
+        print(result.stderr)
+        print("stdout:")
+        print(result.stdout)
+
+    else:
+        print(result.stdout)
+        with open(f"{OUTPUT_DIR}/{run_tag}/scores.txt", "w", encoding="utf8") as f:
+            f.write(result.stdout)
+
+        print(f"✅ Scores written to {OUTPUT_DIR}/{run_tag}/scores.txt")
+
+
+def prepare_for_evaluation(original_ds, run_tag):
+    # 2. Read original system outputs
+    with open(f"{OUTPUT_DIR}/{run_tag}/{SYSTEM_OUTPUTS_PATH}.txt", "r", encoding="utf8") as fin:
+        outputs = [line.strip() for line in fin]
+
+    # 3. Deduplicate: keep first output per unique MR
+    seen = set()
+    uniq_outputs = []
+    for mr, out in zip(original_ds["test"]["meaning_representation"], outputs):
+        if mr not in seen:
+            uniq_outputs.append(out)
+            seen.add(mr)
+
+    output_path = f"{OUTPUT_DIR}/{run_tag}/{SYSTEM_OUTPUTS_PATH}_uniq.txt"
+    os.makedirs(os.path.dirname(f"{OUTPUT_DIR}/{run_tag}"), exist_ok=True)
+
+    # 4. Write the reduced file
+    with open(output_path, "w", encoding="utf8") as fout:
+        for line in uniq_outputs:
+            fout.write(line + "\n")
+
+    print(f"✅ Wrote {SYSTEM_OUTPUTS_PATH}_uniq with {len(uniq_outputs)} lines")
+
+
+def set_tokenizer(tokenizer, padding_side):
+    tokenizer.padding_side = padding_side
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+        print("Added new pad token:", tokenizer.pad_token)
 
 def set_contiguous(model):
     for m in model.modules():
@@ -59,6 +109,14 @@ def set_contiguous(model):
             base = m.parametrizations.weight[0].base
             if not base.is_contiguous():
                 base.data = base.data.contiguous()
+
+
+def get_base_model(model_type, device, tokenizer):
+    base_model = AutoModelForCausalLM.from_pretrained(model_type)
+    base_model.resize_token_embeddings(len(tokenizer))
+    base_model.config.pad_token_id = tokenizer.pad_token_id
+    base_model = base_model.to(device)    
+    return base_model
 
 
 def get_tokenizer_and_model(model_path: str, device):
@@ -70,13 +128,9 @@ def get_tokenizer_and_model(model_path: str, device):
     base_model_name = peft_config.base_model_name_or_path
 
     # 2) Load base model and tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-    set_tokenizer(tokenizer)
+    tokenizer = get_tokenizer(base_model_name)
 
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name)
-    base_model.config.pad_token_id = tokenizer.pad_token_id
-    base_model.generation_config.pad_token_id = tokenizer.pad_token_id
-    base_model = base_model.to(device)
+    base_model = get_base_model(base_model_name, device, tokenizer)
 
     # 3) Load the adapter into the base model
     model = PeftModel.from_pretrained(base_model, model_path)
@@ -91,42 +145,39 @@ def get_tokenizer_and_model(model_path: str, device):
 
 def get_tokenizer(model_type):
     tokenizer = AutoTokenizer.from_pretrained(model_type)
-    set_tokenizer(tokenizer)
+    set_tokenizer(tokenizer, padding_side="right")
     return tokenizer
 
 
 def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_collator, model_path="outputs/models", model_type="gpt2-medium"):
     print("finetuning model \n", flush=True)
-    # orthoLoRAConfig = UIOrthoLoRAConfig(
-    # target_modules=orthoLoRA_args.target_modules,
-    # fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
-    # initial_scaler         = orthoLoRA_args.initial_scaler,    # scale of the diagonal Σ at init
-    # initial_sigma          = orthoLoRA_args.initial_sigma,    # std-dev for the trainable Σ entries
-    # uiortholora_alpha      = orthoLoRA_args.uiortholora_alpha,
-    # uiortholora_dropout    = orthoLoRA_args.uiortholora_dropout,
-    # num_svalues_to_adapt   = orthoLoRA_args.num_svalues_to_adapt,       
-    # num_svectors_to_adapt  = orthoLoRA_args.num_svectors_to_adapt,       
-    # task_type              = TaskType.CAUSAL_LM)
+    orthoLoRAConfig = UIOrthoLoRAConfig(
+    target_modules=orthoLoRA_args.target_modules,
+    fan_in_fan_out         = True,   # GPT-2 matrices are (out, in)
+    initial_scaler         = orthoLoRA_args.initial_scaler,    # scale of the diagonal Σ at init
+    initial_sigma          = orthoLoRA_args.initial_sigma,    # std-dev for the trainable Σ entries
+    uiortholora_alpha      = orthoLoRA_args.uiortholora_alpha,
+    uiortholora_dropout    = orthoLoRA_args.uiortholora_dropout,
+    num_svalues_to_adapt   = orthoLoRA_args.num_svalues_to_adapt,       
+    num_svectors_to_adapt  = orthoLoRA_args.num_svectors_to_adapt,       
+    task_type              = TaskType.CAUSAL_LM)
 
-    lora_cfg = LoraConfig(
-    r=8,                        # rank
-    lora_alpha=32,              # α so that α / r = 4
-    lora_dropout=0.05,          # small regulariser
-    bias="none",
-    task_type=TaskType.CAUSAL_LM,
-    fan_in_fan_out=True,        # GPT-2 matrices are (out, in)
-    target_modules=[            # touch Wq & Wv only
-        "attn.c_attn",          # covers q,k,v in one tensor
-    ],
-)
+    # lora_cfg = LoraConfig(
+    # r=4,                        # rank
+    # lora_alpha=16,              # α so that α / r = 4
+    # lora_dropout=0.05,          # small regulariser
+    # task_type=TaskType.CAUSAL_LM,
+    # fan_in_fan_out=True,        # GPT-2 matrices are (out, in)
+    # target_modules=[            # touch Wq & Wv only
+    #     "attn.c_attn",          # covers q,k,v in one tensor
+    # ],
+    # )
 
-    base_model = AutoModelForCausalLM.from_pretrained(model_type)
-    base_model.config.pad_token_id = tokenizer.pad_token_id
-    base_model = base_model.to(device)
+    base_model = get_base_model(model_type, device, tokenizer)
     print("base model loaded \n", flush=True)
 
     # orthoLora_model = get_peft_model(base_model, orthoLoRAConfig)
-    orthoLora_model = get_peft_model(base_model, lora_cfg)
+    orthoLora_model = get_peft_model(base_model, orthoLoRAConfig)
     set_contiguous(orthoLora_model)
     orthoLora_model = orthoLora_model.to(device)
     orthoLora_model.print_trainable_parameters()
@@ -152,6 +203,8 @@ def run_inference(
     tokenizer,
     ds,
     inference_args,
+    original_ds,
+    run_tag,
     out_dir="outputs",          # folder where we write system_outputs.txt
 ):
     """
@@ -163,7 +216,7 @@ def run_inference(
     device = model.device
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "system_outputs.txt"
+    out_path = out_dir / f"{SYSTEM_OUTPUTS_PATH}.txt"
 
     gen_texts = []
     tokenizer.padding_side = "left"
@@ -213,13 +266,11 @@ def run_inference(
             f.write(line + "\n")
 
     print(f"📝 Saved {len(gen_texts)} predictions → {out_path}")
-    print("Now run the official scorer, e.g.:")
-    print("docker run --rm -v $(pwd)/outputs:/data -v PATH/TO/e2e-metrics/references:/refs "
-          "e2e-metrics ./measure_scores.py -p /data/system_outputs.txt -r /refs -s")
 
 
 
-def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", training_args=None, finetune=False, peft_config=None, inference_args=None):
+def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium",
+                        training_args=None, finetune=False, peft_config=None, inference_args=None, run_tag=None, inference=False, evaluate=False):
     print("training and evaluating \n", flush=True)
 
     # set seed and device
@@ -234,6 +285,7 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", tr
 
     # load dataset
     ds = load_and_prepare(tokenizer)
+    original_ds = load_dataset("tuetschek/e2e_nlg", trust_remote_code=True)
     print("dataset loaded \n", flush=True)
 
     if finetune:
@@ -242,8 +294,14 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium", tr
 
     else:
         tokenizer, model, peft_config = get_tokenizer_and_model(model_path, device)
-        set_tokenizer(tokenizer)
         print("Loaded already finetuned model \n", flush=True)
 
     # run inference and save results
-    run_inference(model, tokenizer, ds, inference_args, out_dir=training_args.output_dir)
+    if inference:
+        print("setting tokenizer padding side to left for inference \n", flush=True)
+        set_tokenizer(tokenizer, padding_side="left")
+        run_inference(model, tokenizer, ds, inference_args, original_ds, run_tag, out_dir=training_args.output_dir)
+
+    if evaluate:
+        prepare_for_evaluation(original_ds, run_tag)
+        run_evaluation(run_tag)
