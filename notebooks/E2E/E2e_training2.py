@@ -12,9 +12,25 @@ from transformers.data.data_collator import DataCollatorWithPadding
 from datasets import load_dataset
 from pathlib import Path
 from torch.utils.data import DataLoader
+import random
+import transformers
 
-OUTPUT_DIR = "outputs/results"
 SYSTEM_OUTPUTS_PATH = "system_outputs"
+
+def set_seed(seed=42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU (even if you only use one)
+    
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    transformers.set_seed(seed)  # affects Hugging Face Trainer, etc.
+
+    print(f"✅ Seed set to {seed} for reproducibility")
 
 def load_and_prepare(tokenizer):
     ds = load_dataset("tuetschek/e2e_nlg", trust_remote_code=True)
@@ -46,13 +62,13 @@ def load_and_prepare(tokenizer):
     return ds.map(to_features, remove_columns=ds["train"].column_names)
 
 
-def run_evaluation(run_tag):
+def run_evaluation(results_output_dir, run_tag):
     result = subprocess.run(
         [
             "python", "e2e-metrics/measure_scores.py",
             "--python",
-            f"{OUTPUT_DIR}/testset.txt",
-            f"{OUTPUT_DIR}/{run_tag}/system_outputs_uniq.txt"
+            f"{results_output_dir}/testset.txt",
+            f"{results_output_dir}/{run_tag}/system_outputs_uniq.txt"
         ],
         capture_output=True,
         text=True
@@ -67,15 +83,15 @@ def run_evaluation(run_tag):
 
     else:
         print(result.stdout)
-        with open(f"{OUTPUT_DIR}/{run_tag}/scores.txt", "w", encoding="utf8") as f:
+        with open(f"{results_output_dir}/{run_tag}/scores.txt", "w", encoding="utf8") as f:
             f.write(result.stdout)
 
-        print(f"✅ Scores written to {OUTPUT_DIR}/{run_tag}/scores.txt")
+        print(f"✅ Scores written to {results_output_dir}/{run_tag}/scores.txt")
 
 
-def prepare_for_evaluation(original_ds, run_tag):
+def prepare_for_evaluation(original_ds, results_output_dir, run_tag):
     # 2. Read original system outputs
-    with open(f"{OUTPUT_DIR}/{run_tag}/{SYSTEM_OUTPUTS_PATH}.txt", "r", encoding="utf8") as fin:
+    with open(f"{results_output_dir}/{run_tag}/{SYSTEM_OUTPUTS_PATH}.txt", "r", encoding="utf8") as fin:
         outputs = [line.strip() for line in fin]
 
     # 3. Deduplicate: keep first output per unique MR
@@ -86,8 +102,8 @@ def prepare_for_evaluation(original_ds, run_tag):
             uniq_outputs.append(out)
             seen.add(mr)
 
-    output_path = f"{OUTPUT_DIR}/{run_tag}/{SYSTEM_OUTPUTS_PATH}_uniq.txt"
-    os.makedirs(os.path.dirname(f"{OUTPUT_DIR}/{run_tag}"), exist_ok=True)
+    output_path = f"{results_output_dir}/{run_tag}/{SYSTEM_OUTPUTS_PATH}_uniq.txt"
+    os.makedirs(os.path.dirname(f"{results_output_dir}/{run_tag}"), exist_ok=True)
 
     # 4. Write the reduced file
     with open(output_path, "w", encoding="utf8") as fout:
@@ -149,7 +165,7 @@ def get_tokenizer(model_type):
     return tokenizer
 
 
-def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_collator, model_path="outputs/models", model_type="gpt2-medium"):
+def finetune_model(tokenizer,training_args, orthoLoRA_args, ds, device, data_collator, model_path="outputs/models_dropout", model_type="gpt2-medium"):
     print("finetuning model \n", flush=True)
     orthoLoRAConfig = UIOrthoLoRAConfig(
     target_modules=orthoLoRA_args.target_modules,
@@ -203,9 +219,7 @@ def run_inference(
     tokenizer,
     ds,
     inference_args,
-    original_ds,
-    run_tag,
-    out_dir="outputs",          # folder where we write system_outputs.txt
+    out_dir,          # folder where we write system_outputs.txt
 ):
     """
     Generate E2E test predictions and save them to
@@ -269,15 +283,16 @@ def run_inference(
 
 
 
-def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium",
-                        training_args=None, finetune=False, peft_config=None, inference_args=None, run_tag=None, inference=False, evaluate=False):
+def train_and_evaluate(output_dir, models_dir, results_dir,
+                       model_type="gpt2-medium", training_args=None, finetune=False, peft_config=None,
+                       inference_args=None, run_tag=None, inference=False, evaluate=False, seed=42):
     print("training and evaluating \n", flush=True)
 
     # set seed and device
-    seed=42
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = f"{output_dir}/{models_dir}/{run_tag}"
+    results_output_dir = f"{output_dir}/{results_dir}"
     print("device: ", device, flush=True)   
 
     tokenizer = get_tokenizer(model_type)
@@ -300,8 +315,8 @@ def train_and_evaluate(model_path="outputs/models", model_type="gpt2-medium",
     if inference:
         print("setting tokenizer padding side to left for inference \n", flush=True)
         set_tokenizer(tokenizer, padding_side="left")
-        run_inference(model, tokenizer, ds, inference_args, original_ds, run_tag, out_dir=training_args.output_dir)
+        run_inference(model, tokenizer, ds, inference_args, out_dir=training_args.output_dir)
 
     if evaluate:
-        prepare_for_evaluation(original_ds, run_tag)
-        run_evaluation(run_tag)
+        prepare_for_evaluation(original_ds, results_output_dir, run_tag)
+        run_evaluation(results_output_dir, run_tag)

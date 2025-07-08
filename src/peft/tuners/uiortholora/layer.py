@@ -87,6 +87,7 @@ class UIOrthoLoRALayer(BaseTunerLayer):
 
         # Compute SVD and slice the smallest singular vectors
         U, S, Vt = torch.linalg.svd(base_w.float(), full_matrices=False) # TODO: validate the full matrices.
+        print("Calculated SVD")
         if self.num_svalues_to_adapt == 0:
             ids = torch.argsort(S)[:self.num_svalues_to_adapt]
             U, Vt = U[:, ids], Vt[ids, :]

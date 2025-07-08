@@ -3,7 +3,7 @@
 # Save this file as run_pissa_finetune.sh and make it executable with:
 # chmod +x run_pissa_finetune.sh
 
-export CUDA_VISIBLE_DEVICES=2,3   
+export CUDA_VISIBLE_DEVICES=0,1,3
 
 deepspeed \
     GSM8_training.py \
@@ -24,8 +24,6 @@ deepspeed \
     --save_total_limit 1 \
     --eval_strategy no \
     --report_to none \
-    --bf16 False \
-    --fp16 False \
     --logging_dir ./logs \
     --do_train \
     --overwrite_output_dir \
@@ -33,4 +31,5 @@ deepspeed \
     --optim adamw_torch \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
-    --weight_decay 0.0
+    --weight_decay 0.0 \
+    --fp16 True
