@@ -3,13 +3,13 @@
 # Save this file as run_pissa_finetune.sh and make it executable with:
 # chmod +x run_pissa_finetune.sh
 
-export CUDA_VISIBLE_DEVICES=0,1,3
+# export CUDA_VISIBLE_DEVICES=0,1,3
 
 deepspeed \
     GSM8_training.py \
     --model_name_or_path mistralai/Mistral-7B-v0.1 \
     --data_path metamath-dataset \
-    --sub_task metamathqa:1000 \
+    --sub_task metamathqa:100 \
     --dataset_field query response \
     --dataset_split train \
     --output_dir ./uilora-mistral-test \
@@ -27,9 +27,9 @@ deepspeed \
     --logging_dir ./logs \
     --do_train \
     --overwrite_output_dir \
-    --deepspeed ds_config_zero3.json \
     --optim adamw_torch \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --weight_decay 0.0 \
-    --fp16 True
+    # --fp16 True
+    # --deepspeed ds_config_zero3.json \

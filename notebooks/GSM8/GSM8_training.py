@@ -4,12 +4,12 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Sequence, List
 import logging
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import torch
 import torch.distributed
 import transformers
-from transformers import Trainer, BitsAndBytesConfig
+from transformers import Trainer
 from datasets import load_dataset, concatenate_datasets, load_from_disk
 import datasets
 import numpy as np
@@ -18,12 +18,20 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 IGNORE_INDEX = -100
 logger = logging.getLogger(__name__)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 PROMPT = (
         "Below is an instruction that describes a task. "
         "Write a response that appropriately completes the request.\n\n"
         "### Instruction:\n{instruction}\n\n### Response:"
     )
+
+def set_contiguous(model):
+    for m in model.modules():
+        if hasattr(m, "parametrizations") and "weight" in m.parametrizations:
+            base = m.parametrizations.weight[0].base
+            if not base.is_contiguous():
+                base.data = base.data.contiguous()
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -167,6 +175,9 @@ def build_model(script_args, checkpoint_dir):
     )
     setattr(model, 'model_parallel', True)
     setattr(model, 'is_parallelizable', True)
+
+    model = model.to(device)
+    print("The model is on the device: ", device)
     
     if not script_args.full_finetune:
         if checkpoint_dir is not None:
@@ -207,10 +218,12 @@ def build_model(script_args, checkpoint_dir):
             #     init_lora_weights=True,
             # )
             model = get_peft_model(model, peft_config)
-
+            
+    set_contiguous(model)
     for name, module in model.named_modules():
         if 'norm' in name or 'gate' in name:
             module = module.to(torch.float32)
+
     return model
 
 def train():
