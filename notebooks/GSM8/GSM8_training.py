@@ -33,6 +33,21 @@ def set_contiguous(model):
             if not base.is_contiguous():
                 base.data = base.data.contiguous()
 
+def set_seed(seed=42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # For multi-GPU (even if you only use one)
+    
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    transformers.set_seed(seed)  # affects Hugging Face Trainer, etc.
+
+    print(f"✅ Seed set to {seed} for reproducibility")
+
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     # Base model or residual model setting
@@ -203,8 +218,8 @@ def build_model(script_args, checkpoint_dir):
                 initial_sigma=0.1,
                 uiortholora_alpha=1,
                 uiortholora_dropout=0,
-                num_svalues_to_adapt=128,
-                num_svectors_to_adapt=45,
+                num_svalues_to_adapt=1024,
+                num_svectors_to_adapt=128,
             )
             # peft_config = LoraConfig(
             #     use_dora=False,
@@ -212,12 +227,15 @@ def build_model(script_args, checkpoint_dir):
             #     task_type=TaskType.CAUSAL_LM,
             #     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
             #     inference_mode=False,
-            #     r=2, 
+            #     r=32, 
             #     lora_alpha=32,
             #     lora_dropout=0,
             #     init_lora_weights=True,
             # )
             model = get_peft_model(model, peft_config)
+            print("**************************")
+            model.print_trainable_parameters()
+            print("**************************")
             
     set_contiguous(model)
     for name, module in model.named_modules():
@@ -239,6 +257,8 @@ def train():
     if script_args.local_rank == 0:
         logger.info('='*100)
         logger.info(script_args)
+
+    set_seed(script_args.seed)
     
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         script_args.model_name_or_path,

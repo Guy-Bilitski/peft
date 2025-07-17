@@ -9,15 +9,15 @@ deepspeed \
     GSM8_training.py \
     --model_name_or_path mistralai/Mistral-7B-v0.1 \
     --data_path metamath-dataset \
-    --sub_task metamathqa:100 \
+    --sub_task metamathqa:100000 \
     --dataset_field query response \
     --dataset_split train \
-    --output_dir ./uilora-mistral-test \
+    --output_dir ./uiortholora-mistral-run-1024-128 \
     --full_finetune False \
     --model_max_length 512 \
     --per_device_train_batch_size 1 \
     --gradient_accumulation_steps 16 \
-    --learning_rate 2e-5 \
+    --learning_rate 1e-4 \
     --num_train_epochs 1 \
     --logging_steps 10 \
     --save_strategy no \
@@ -31,5 +31,6 @@ deepspeed \
     --lr_scheduler_type cosine \
     --warmup_ratio 0.03 \
     --weight_decay 0.0 \
+    --seed 42 \
     # --fp16 True
     # --deepspeed ds_config_zero3.json \

@@ -85,37 +85,53 @@ class UIOrthoLoRALayer(BaseTunerLayer):
         if self.fan_in_fan_out:
             base_w = base_w.T  # transpose before doing SVD
 
+        rank = min(self.in_features, self.out_features)
+        # rank_to_preserve = rank - self.num_svectors_to_adapt
+        major_component_size = rank - self.num_svalues_to_adapt
+        medium_component_size = rank - self.num_svectors_to_adapt
+
         # Compute SVD and slice the smallest singular vectors
-        U, S, Vt = torch.linalg.svd(base_w.float(), full_matrices=False) # TODO: validate the full matrices.
-        print("Calculated SVD")
+        U, S, Vt = torch.linalg.svd(base_w.float(), full_matrices=False)
+        print(f"Calculated SVD")
         if self.num_svalues_to_adapt == 0:
             ids = torch.argsort(S)[:self.num_svalues_to_adapt]
             U, Vt = U[:, ids], Vt[ids, :]
 
-        self.register_buffer(f"{adapter_name}_U", U.detach(), persistent=True)
-        self.register_buffer(f"{adapter_name}_Vt", Vt.detach(), persistent=True)
+        # Major component
+        U1 = U[:, :major_component_size].detach()
+        S1 = S[:major_component_size].detach()
+        Vt1 = Vt[:major_component_size, :].detach()
+        with torch.no_grad():
+            major_component = (U1 * S1) @ Vt1
+        self.register_buffer(f"{adapter_name}_major_component", major_component, persistent=True)
+
+        # Medium component between svalues and svectors
+        self.register_buffer(f"{adapter_name}_U2", U[:, major_component_size:medium_component_size].detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_S2", S[major_component_size:medium_component_size].detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_Vt2", Vt[major_component_size:medium_component_size, :].detach(), persistent=True)
+
+        # Small component
+        self.register_buffer(f"{adapter_name}_U3", U[:, medium_component_size:].detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_S3", S[medium_component_size:].detach(), persistent=True)
+        self.register_buffer(f"{adapter_name}_Vt3", Vt[medium_component_size:, :].detach(), persistent=True)
 
         # Initialize parameters with provided values or defaults
-        self.uiortholora_sigma[adapter_name] = nn.Parameter(torch.full((self.num_svalues_to_adapt,), initial_sigma))
+        self.uiortholora_sigma[adapter_name] = nn.Parameter(torch.full((self.num_svalues_to_adapt,), initial_sigma, dtype=torch.float))
 
         # Initialize D and E with provided scaler or default of 1
-        self.uiortholora_D[adapter_name] = nn.Parameter(torch.full((self.in_features,), initial_scaler))
-        self.uiortholora_E[adapter_name] = nn.Parameter(torch.full((self.out_features,), initial_scaler))
+        self.uiortholora_D[adapter_name] = nn.Parameter(torch.full((self.in_features,), initial_scaler, dtype=torch.float))
+        self.uiortholora_E[adapter_name] = nn.Parameter(torch.full((self.out_features,), initial_scaler, dtype=torch.float))
 
-        rank = min(self.in_features, self.out_features)
-        rank_to_preserve = rank - self.num_svectors_to_adapt
-        orthogonal_size = rank - rank_to_preserve
-
-        if orthogonal_size == 0:
+        if self.num_svectors_to_adapt == 0:
             left_orthogonal = IdentityWithTranspose()
             right_orthogonal = IdentityWithTranspose()
 
         else:
             left_orthogonal = torch.nn.utils.parametrizations.orthogonal(
-                nn.Linear(orthogonal_size, orthogonal_size, bias=False)
+                nn.Linear(self.num_svectors_to_adapt, self.num_svectors_to_adapt, bias=False)
             )
             right_orthogonal = torch.nn.utils.parametrizations.orthogonal(
-                nn.Linear(orthogonal_size, orthogonal_size, bias=False)
+                nn.Linear(self.num_svectors_to_adapt, self.num_svectors_to_adapt, bias=False)
             )
         
         self.uiortholora_left_unitary[adapter_name] = left_orthogonal
@@ -242,6 +258,28 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             if active_adapter in self.uiortholora_sigma.keys():
                 self.get_base_layer().weight.data -= self.get_delta_weight(active_adapter)
 
+    def _calc_tuner_internal(self, adapter: str):
+        major_component = getattr(self, f"{adapter}_major_component").detach().clone()
+        U2 = getattr(self, f"{adapter}_U2")
+        Vt2 = getattr(self, f"{adapter}_Vt2")
+        S2 = getattr(self, f"{adapter}_S2")
+        U3 = getattr(self, f"{adapter}_U3")
+        Vt3 = getattr(self, f"{adapter}_Vt3")
+        S3 = getattr(self, f"{adapter}_S3")
+
+        if self.num_svectors_to_adapt > 0:
+            new_U3 = U3 @ self.uiortholora_left_unitary[adapter].weight
+            new_Vt3 = (Vt3.T @ self.uiortholora_right_unitary[adapter].weight).T
+        else:
+            new_U3 = U3
+            new_Vt3 = Vt3
+
+        major_component.addmm_(U2 * S2, Vt2, beta=1.0, alpha=1.0)
+        major_component.addmm_(new_U3 * S3, new_Vt3, beta=1.0, alpha=1.0)
+        return major_component
+
+
+
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.disable_adapters:
             if self.merged:
@@ -261,23 +299,28 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             if self._meta[name]["pos"]:
                 diag = torch.relu(diag)
 
-            U = getattr(self, f"{name}_U")               # (out, r)
-            Vt = getattr(self, f"{name}_Vt")               # (r, in)
+            # U = getattr(self, f"{name}_U")               # (out, r)
+            # Vt = getattr(self, f"{name}_Vt")               # (r, in)
             D = self.uiortholora_D[name]                   # (in,)
             E = self.uiortholora_E[name]
-            orthogonal_size = min(self.in_features, self.out_features)
-            left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], orthogonal_size)
-            right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], orthogonal_size)
+            # orthogonal_size = min(self.in_features, self.out_features)
+            # left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], orthogonal_size)
+            # right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], orthogonal_size)
             
 
             x_casted = x.to(diag.dtype)
-            
-            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (right_unitary.T @ Vt) * D.unsqueeze(0))
-            sigma = self._calc_sigma(diag, orthogonal_size)
-            x_proj = x_proj @ sigma
-            delta = F.linear(x_proj, (U @ left_unitary) * E.unsqueeze(1))
+            svd_tuner = self._calc_tuner_internal(name)
+            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), svd_tuner * D.unsqueeze(0))
 
-            result = result + self._meta[name]["sf"] * delta
+            delta = self._meta[name]["sf"] * x_proj * E.view(1,1,-1)
+            result = result + delta
+            
+            # x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (right_unitary.T @ Vt) * D.unsqueeze(0))
+            # sigma = self._calc_sigma(diag, orthogonal_size)
+            # x_proj = x_proj @ sigma
+            # delta = F.linear(x_proj, (U @ left_unitary) * E.unsqueeze(1))
+
+            # result = result + self._meta[name]["sf"] * delta
 
         return result
 
