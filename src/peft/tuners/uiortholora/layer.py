@@ -187,28 +187,10 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
 
         This is a proper, differentiable version safe for inspection or merging.
         """
-        diag = self.uiortholora_sigma[adapter]
-        # if self._meta[adapter]["pos"]:
-        #     diag = torch.relu(diag.clone())
-
-        U = getattr(self, f"{adapter}_U")
-        Vt = getattr(self, f"{adapter}_Vt")
-
         D = self.uiortholora_D[adapter]
         E = self.uiortholora_E[adapter]
-        left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[adapter], self.in_features)
-        right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[adapter], self.out_features)
-        # Broadcast D and E
-        VtD = Vt * D.unsqueeze(0).clone()
-        EU = U * E.unsqueeze(1).clone()
-
-        orthogonal_size = min(self.in_features, self.out_features)
-        Σ = self._calc_sigma(diag, orthogonal_size)
-
-        core = EU @ left_unitary @ Σ @ right_unitary.T @ VtD
-        return self._meta[adapter]["sf"] * core.to(self.get_base_layer().weight.dtype)
-
-
+        internal_weight = self._calc_tuner_internal(adapter)
+        return (E[:, None] * internal_weight) * D[None, :]
 
     def merge(self, *, safe_merge: bool = False, adapter_names: Optional[List[str]] = None):
         """
@@ -299,28 +281,15 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
             if self._meta[name]["pos"]:
                 diag = torch.relu(diag)
 
-            # U = getattr(self, f"{name}_U")               # (out, r)
-            # Vt = getattr(self, f"{name}_Vt")               # (r, in)
-            D = self.uiortholora_D[name]                   # (in,)
+            D = self.uiortholora_D[name]
             E = self.uiortholora_E[name]
-            # orthogonal_size = min(self.in_features, self.out_features)
-            # left_unitary = self._calc_left_unitary(self.uiortholora_left_unitary[name], orthogonal_size)
-            # right_unitary = self._calc_right_unitary(self.uiortholora_right_unitary[name], orthogonal_size)
             
-
             x_casted = x.to(diag.dtype)
             svd_tuner = self._calc_tuner_internal(name)
             x_proj = F.linear(self.uiortholora_dropout[name](x_casted), svd_tuner * D.unsqueeze(0))
 
-            delta = self._meta[name]["sf"] * x_proj * E.view(1,1,-1)
+            delta = self._meta[name]["sf"] * E.view(1,1,-1) * x_proj
             result = result + delta
-            
-            # x_proj = F.linear(self.uiortholora_dropout[name](x_casted), (right_unitary.T @ Vt) * D.unsqueeze(0))
-            # sigma = self._calc_sigma(diag, orthogonal_size)
-            # x_proj = x_proj @ sigma
-            # delta = F.linear(x_proj, (U @ left_unitary) * E.unsqueeze(1))
-
-            # result = result + self._meta[name]["sf"] * delta
 
         return result
 
@@ -353,15 +322,9 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
     
     def _calc_sigma(self, diag_values, orthogonal_size):
         device = self.get_base_layer().weight.device
-        # max_rank = min(left_size, right_size)
         not_trainable_part_size = orthogonal_size - self.num_svalues_to_adapt
         sigma = torch.zeros(orthogonal_size, orthogonal_size, device = device)
         sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device = device)
         sigma[not_trainable_part_size:, not_trainable_part_size:] = torch.diag(diag_values)
-        
-        # if max_rank < left_size:
-        #     sigma = torch.cat((sigma, torch.zeros(left_size - max_rank, max_rank, device = device)), dim=0)
-        # elif max_rank < right_size:
-        #     sigma = torch.cat((sigma, torch.zeros(max_rank, right_size - max_rank, device = device)), dim=1)
         
         return sigma

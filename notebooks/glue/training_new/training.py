@@ -9,7 +9,9 @@ from peft import UIOrthoLoRAConfig, UILinLoRAConfig, get_peft_model, TaskType
 from datetime import datetime
 # from clearml import Task
 import pandas as pd
-
+import random
+import numpy as np
+from transformers import set_seed
 
 
 # ---------------------------  custom trainer  --------------------------- #
@@ -42,8 +44,32 @@ TASK_COLUMNS = {
     "mnli":  ("premise",  "hypothesis"),
 }
 
+def translate_task(task):
+    if "cola" in task:
+        return "cola"
+    elif "sst2" in task:
+        return "sst2"
+    elif "mrpc" in task:
+        return "mrpc"
+    elif "qnli" in task:
+        return "qnli"
+    elif "rte" in task:
+        return "rte"
+    elif "sts-b" in task:
+        return "stsb"
+    else:
+        raise ValueError(f"Unsupported task: {task}")
+    
+def seed_everything(seed: int):
+    os.environ["PYTHONHASHSEED"] = str(seed)       # Python hash randomisation
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    set_seed(seed)    
+
 def prepare_dataset(tokenizer, max_len=128, task="sst2"):
-    cfg = "stsb" if task.lower() == "sts-b" else task.lower()
+    cfg = translate_task(task)
     ds = load_dataset("glue", cfg)
 
     c1, c2 = TASK_COLUMNS[cfg]
@@ -75,13 +101,13 @@ def compute_metrics(eval_pred):
     return eval_metrics.compute(predictions=preds, references=labels)
 
 def get_eval_metric_type(task):
-    if task == "cola":
+    if "cola" in task:
         return "matthews_correlation"
-    elif task in ["mrpc", "qqp"]:
+    elif "mrpc" in task or "qqp" in task:
         return "f1"
-    elif task in ["qnli", "rte", "wnli", "sst2", "mnli"]:
+    elif "qnli" in task or "rte" in task or "wnli" in task or "sst2" in task or "mnli" in task:
         return "accuracy"
-    elif task == "sts-b":
+    elif "sts-b" in task:
         return "pearson"
     else:
         raise ValueError(f"Unsupported task: {task}")
@@ -129,7 +155,7 @@ def write_results(score, timestamp, args, base_dir="results/glue"):
 def is_duplicate_run(args, base_dir="results/glue"):
     if getattr(args, "resume_from_checkpoint", None):
         return False
-    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}.csv")
+    csv_path = os.path.join(base_dir, f"{args.model_type.lower()}_{args.task}_seeds2.csv")
     if not os.path.exists(csv_path):
         return False  # No file yet
 
@@ -228,6 +254,7 @@ def train_model(args):
     # )
     # task.connect(args)
 
+    seed_everything(args.seed)
     torch.set_printoptions(threshold=float("inf"))
     eval_metric_type = get_eval_metric_type(args.task)
     global eval_metrics; eval_metrics = evaluate.load(eval_metric_type)
