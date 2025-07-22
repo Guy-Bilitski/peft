@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import torch
 import subprocess
@@ -17,7 +17,7 @@ import transformers
 
 SYSTEM_OUTPUTS_PATH = "system_outputs"
 
-def set_seed(seed=42):
+def set_seed(seed):
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -49,7 +49,7 @@ def load_and_prepare(tokenizer):
         tok        = tokenizer(text,
                             truncation=True,
                             padding="max_length",
-                            max_length=512)
+                            max_length=200)
 
         labels = tok["input_ids"].copy()
         labels[:len(prompt_ids)] = [-100] * len(prompt_ids)  # mask prompt

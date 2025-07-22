@@ -7,7 +7,7 @@ from training import train_model
 import argparse
 from itertools import product
 
-tasks = ["cola_lin", "sst2_lin", "mrpc_lin", "sts-b_lin", "qnli_lin", "rte_lin", "rte_large", "qnli_large", "mrpc_large", "sst2_large", "cola_large", "sts-b_large"]
+tasks = ["rte_lin", "qnli_lin", "mrpc_large", "sts-b_large", "cola_large", "rte_large", "qnli_large", "sst2_large"]
 batch_size = 64
 max_len = 256
 base_model_id = "roberta-base"
@@ -78,7 +78,7 @@ def get_hyperparameters(task_name):
         initial_sigmas  = [1e-1]
 
     if task_name == "qnli_lin":
-        epochs = 40
+        epochs = 25
         num_svalues_to_adapt = num_svalues_lin
         num_svectors_to_adapt = num_svectors_lin
         head_lrs = [1e-3]
@@ -88,7 +88,7 @@ def get_hyperparameters(task_name):
 
 
     if task_name == "qnli_large":
-        epochs = 40
+        epochs = 25
         num_svalues_to_adapt = num_svalues_large
         num_svectors_to_adapt = num_svectors_large
         head_lrs = [1e-3]

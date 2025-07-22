@@ -5,7 +5,7 @@ from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification,
     TrainingArguments, Trainer
 )
-from peft import UIOrthoLoRAConfig, UILinLoRAConfig, get_peft_model, TaskType
+from peft import UIOrthoLoRAConfig, get_peft_model, TaskType
 from datetime import datetime
 # from clearml import Task
 import pandas as pd
@@ -91,14 +91,30 @@ def prepare_dataset(tokenizer, max_len=128, task="sst2"):
         )
 
     ds = ds.map(tok, batched=True)
+    # ds = ds.rename_column("label", "labels")
     ds = ds.rename_column("label", "labels")
+    if task == "sts-b":
+        ds = ds.map(lambda x: {"labels": [float(l) for l in x["labels"]]})
+
     ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
     return ds
 
+# def compute_metrics(eval_pred):
+#     logits, labels = eval_pred
+#     preds = logits.argmax(-1)
+#     result = eval_metrics.compute(predictions=preds, references=labels)
+#     return {"pearson": result["pearson"]} if "pearson" in result else result
+    # return eval_metrics.compute(predictions=preds, references=labels)
+
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
-    preds = logits.argmax(-1)
-    return eval_metrics.compute(predictions=preds, references=labels)
+    if logits.shape[-1] == 1:  # STS-B (regression)
+        preds = logits.squeeze()
+    else:                      # classification
+        preds = logits.argmax(-1)
+    result = eval_metrics.compute(predictions=preds, references=labels)
+    return {"pearson": result["pearson"]} if "pearson" in result else result
+
 
 def get_eval_metric_type(task):
     if "cola" in task:
@@ -108,7 +124,7 @@ def get_eval_metric_type(task):
     elif "qnli" in task or "rte" in task or "wnli" in task or "sst2" in task or "mnli" in task:
         return "accuracy"
     elif "sts-b" in task:
-        return "pearson"
+        return ("glue", "stsb")
     else:
         raise ValueError(f"Unsupported task: {task}")
 
@@ -191,16 +207,6 @@ def get_peft_config(args):
                 num_svalues_to_adapt=args.num_svalues_to_adapt,
                 num_svectors_to_adapt=args.num_svectors_to_adapt,
                 task_type=TaskType.SEQ_CLS)
-    elif args.model_type == "uilinlora":
-        return UILinLoRAConfig(
-                target_modules=args.target_modules,
-                uilinlora_alpha=args.uilinlora_alpha,
-                uilinlora_dropout=args.uilinlora_dropout,
-                fan_in_fan_out=False,
-                initial_scaler=args.initial_scaler,
-                initial_sigma=args.initial_sigma,
-                rank=args.rank,
-                task_type=TaskType.SEQ_CLS)
     else:
         raise ValueError(f"Unsupported model type: {args.model_type}")
     
@@ -219,7 +225,7 @@ def prepare_trainer(model, args, data, tokenizer, eval_metric_type, timestamp):
         eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
-        metric_for_best_model=eval_metric_type,
+        metric_for_best_model="pearson" if "sts-b" in args.task else eval_metric_type,
         greater_is_better=True,
         warmup_ratio=0.06,
         lr_scheduler_type="linear",
@@ -256,15 +262,27 @@ def train_model(args):
 
     seed_everything(args.seed)
     torch.set_printoptions(threshold=float("inf"))
+    # eval_metric_type = get_eval_metric_type(args.task)
+    # global eval_metrics; eval_metrics = evaluate.load(eval_metric_type)
     eval_metric_type = get_eval_metric_type(args.task)
-    global eval_metrics; eval_metrics = evaluate.load(eval_metric_type)
+    global eval_metrics
+    if isinstance(eval_metric_type, tuple):  # for STS-B
+        eval_metrics = evaluate.load(*eval_metric_type)
+    else:
+        eval_metrics = evaluate.load(eval_metric_type)
 
     base_model_id = args.base_model_id
     tokenizer = AutoTokenizer.from_pretrained(base_model_id, use_fast=True)
 
+    # base_model = AutoModelForSequenceClassification.from_pretrained(
+    #     base_model_id, num_labels=2, device_map="auto"
+    # )
+
+    num_labels = 1 if "sts-b" in args.task else 2
     base_model = AutoModelForSequenceClassification.from_pretrained(
-        base_model_id, num_labels=2, device_map="auto"
+        base_model_id, num_labels=num_labels, device_map="auto"
     )
+
 
     peft_config = get_peft_config(args)
     model = get_peft_model(base_model, peft_config)
@@ -292,7 +310,12 @@ def train_model(args):
         trainer.train()
 
 
-    score = trainer.evaluate()[f"eval_{eval_metric_type}"]
+    if "sts-b" in args.task:
+        score_key = "eval_pearson"
+    else:
+        score_key = f"eval_{eval_metric_type}"
+        
+    score = trainer.evaluate()[score_key]
     print(f"Final {eval_metric_type}:", score)
     write_results(score, timestamp, args)
     # task.close()
