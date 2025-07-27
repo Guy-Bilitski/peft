@@ -171,3 +171,4 @@ notebooks/roberta_base/uilinlora-roberta-base-sst2/checkpoint-8/adapter_config.j
 **/*.json
 completed
 **/*.txt
+**/*.md

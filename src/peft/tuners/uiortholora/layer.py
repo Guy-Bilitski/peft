@@ -241,7 +241,6 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
                 self.get_base_layer().weight.data -= self.get_delta_weight(active_adapter)
 
     def _calc_tuner_internal(self, adapter: str):
-        major_component = getattr(self, f"{adapter}_major_component").detach().clone()
         U2 = getattr(self, f"{adapter}_U2")
         Vt2 = getattr(self, f"{adapter}_Vt2")
         S2 = getattr(self, f"{adapter}_S2")
@@ -255,12 +254,13 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         else:
             new_U3 = U3
             new_Vt3 = Vt3
+        
+        medium_component = (U2 * S2) @ Vt2
+        medium_component.addmm_(new_U3 * S3, new_Vt3, beta=1.0, alpha=1.0)
+        return medium_component
 
-        major_component.addmm_(U2 * S2, Vt2, beta=1.0, alpha=1.0)
-        major_component.addmm_(new_U3 * S3, new_Vt3, beta=1.0, alpha=1.0)
-        return major_component
-
-
+    def _get_major_component(self, adapter):
+        return getattr(self, f"{adapter}_major_component").detach()
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.disable_adapters:
@@ -271,27 +271,33 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
         if self.merged:
             return self.base_layer(x, *args, **kwargs)
 
-        result = self.base_layer(x, *args, **kwargs)
+        out_shape = x.shape[:-1] + (self.out_features,)
+        out = x.new_zeros(out_shape)          # keeps dtype & device of x
 
         for name in self.active_adapters:
             if name not in self.uiortholora_sigma.keys():
                 continue
 
-            diag = self.uiortholora_sigma[name]
-            if self._meta[name]["pos"]:
-                diag = torch.relu(diag)
-
             D = self.uiortholora_D[name]
             E = self.uiortholora_E[name]
+            if (x.dtype != D.dtype):
+                x = x.to(D.dtype)
+
+            scaling_matrix = torch.outer(E,D)
             
-            x_casted = x.to(diag.dtype)
-            svd_tuner = self._calc_tuner_internal(name)
-            x_proj = F.linear(self.uiortholora_dropout[name](x_casted), svd_tuner * D.unsqueeze(0))
 
-            delta = self._meta[name]["sf"] * E.view(1,1,-1) * x_proj
-            result = result + delta
+            major_component = self._get_major_component(name)
+            W_major = major_component * (1+scaling_matrix)
+            
+            x_casted = x.to(D.dtype) if x.dtype != D.dtype else x
+            x_dropout = self.uiortholora_dropout[name](x_casted)
 
-        return result
+            svd_tuner_minor = self._calc_tuner_internal(name)
+            W_minor = svd_tuner_minor * scaling_matrix
+
+            out.add_(F.linear(x_dropout, W_major + W_minor))
+
+        return out
 
 
     def get_base_layer(self):
@@ -300,31 +306,31 @@ class Linear(nn.Linear, UIOrthoLoRALayer):
     def __repr__(self):
         return f"UIOrthoLoRALayer({self.get_base_layer().__repr__()})"
     
-    def _calc_left_unitary(self, left_unitary, left_size):
-        if self.num_svectors_to_adapt == 0:
-            return left_unitary
+    # def _calc_left_unitary(self, left_unitary, left_size):
+    #     if self.num_svectors_to_adapt == 0:
+    #         return left_unitary
 
-        rank_to_preserve = left_size - self.num_svectors_to_adapt
-        return self._build_projection_matrix(left_unitary.weight, left_size, rank_to_preserve)
+    #     rank_to_preserve = left_size - self.num_svectors_to_adapt
+    #     return self._build_projection_matrix(left_unitary.weight, left_size, rank_to_preserve)
     
-    def _calc_right_unitary(self, right_unitary, right_size):
-        if self.num_svectors_to_adapt == 0:
-            return right_unitary
+    # def _calc_right_unitary(self, right_unitary, right_size):
+    #     if self.num_svectors_to_adapt == 0:
+    #         return right_unitary
 
-        rank_to_preserve = right_size - self.num_svectors_to_adapt
-        return self._build_projection_matrix(right_unitary.weight, right_size, rank_to_preserve)
+    #     rank_to_preserve = right_size - self.num_svectors_to_adapt
+    #     return self._build_projection_matrix(right_unitary.weight, right_size, rank_to_preserve)
     
-    def _build_projection_matrix(self, projection_matrix, size, rank_to_preserve):
-        upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device)
-        upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device = self.get_base_layer().weight.device)), dim=1)
-        down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device), projection_matrix), dim=1)
-        return torch.cat((upper_matrix, down_matrix), dim=0)
+    # def _build_projection_matrix(self, projection_matrix, size, rank_to_preserve):
+    #     upper_matrix = torch.eye(rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device)
+    #     upper_matrix = torch.cat((upper_matrix, torch.zeros(rank_to_preserve, size - rank_to_preserve, device = self.get_base_layer().weight.device)), dim=1)
+    #     down_matrix = torch.cat((torch.zeros(size - rank_to_preserve, rank_to_preserve, device = self.get_base_layer().weight.device), projection_matrix), dim=1)
+    #     return torch.cat((upper_matrix, down_matrix), dim=0)
     
-    def _calc_sigma(self, diag_values, orthogonal_size):
-        device = self.get_base_layer().weight.device
-        not_trainable_part_size = orthogonal_size - self.num_svalues_to_adapt
-        sigma = torch.zeros(orthogonal_size, orthogonal_size, device = device)
-        sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device = device)
-        sigma[not_trainable_part_size:, not_trainable_part_size:] = torch.diag(diag_values)
+    # def _calc_sigma(self, diag_values, orthogonal_size):
+    #     device = self.get_base_layer().weight.device
+    #     not_trainable_part_size = orthogonal_size - self.num_svalues_to_adapt
+    #     sigma = torch.zeros(orthogonal_size, orthogonal_size, device = device)
+    #     sigma[:not_trainable_part_size, :not_trainable_part_size] = torch.eye(not_trainable_part_size, device = device)
+    #     sigma[not_trainable_part_size:, not_trainable_part_size:] = torch.diag(diag_values)
         
-        return sigma
+    #     return sigma

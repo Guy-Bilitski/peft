@@ -219,7 +219,7 @@ def build_model(script_args, checkpoint_dir):
                 uiortholora_alpha=1,
                 uiortholora_dropout=0,
                 num_svalues_to_adapt=1024,
-                num_svectors_to_adapt=128,
+                num_svectors_to_adapt=256,
             )
             # peft_config = LoraConfig(
             #     use_dora=False,

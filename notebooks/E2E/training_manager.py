@@ -49,17 +49,16 @@ INFERENCE_ARGS = {
     "no_repeat_ngram_size": 4,
     "length_penalty": 0.9,
     "max_new_tokens": 64,
-    "inference_batch_size": 16,
+    "inference_batch_size": 128,
 }
 
 # ───────────── grid of learning-rates to try ───────────── #
-SEARCH_LRS = [7e-2, 8e-2, 9e-2, 1e-1]
-NUM_SVALUES = [256]
-NUM_SVECTORS = [60]
-# SEEDS = [2021, 17, 31415, 1054]
-SEEDS = [31415]
-INIT_SIGMA = [0.01]
-INIT_SCALER = [0.01]
+SEARCH_LRS = [5e-2]
+NUM_SVALUES = [128, 256]
+NUM_SVECTORS = [30, 60, 120]
+SEEDS = [17]
+INIT_SIGMA = [0.1]
+INIT_SCALER = [0.1]
 
 # ───────────────────────── main loop ───────────────────── #
 def main() -> None:
